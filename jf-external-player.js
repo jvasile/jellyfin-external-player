@@ -86,7 +86,7 @@
         document.body.appendChild(modalElement);
         statusElement = modalElement.querySelector('.modal-status');
 
-        document.addEventListener('keydown', handleModalKeydown);
+        document.addEventListener('keydown', handleModalKeydown, true);
         startStatusPolling();
     }
 
@@ -101,31 +101,33 @@
         }
     }
 
-    function hideModal() {
+    function hideModal(stopPlayer = true) {
         if (pollInterval) {
             clearInterval(pollInterval);
             pollInterval = null;
         }
-        document.removeEventListener('keydown', handleModalKeydown);
+        document.removeEventListener('keydown', handleModalKeydown, true);
         if (modalElement) {
             modalElement.remove();
             modalElement = null;
             statusElement = null;
+        }
+        if (stopPlayer) {
+            fetch(KIOSK_SERVER + '/api/stop', { method: 'POST' }).catch(() => {});
         }
     }
 
     function handleModalKeydown(event) {
         if (event.key === 'Escape') {
             event.preventDefault();
+            event.stopPropagation();
             stopPlayback();
         }
     }
 
     function stopPlayback() {
         updateModalStatus('Stopping playback...');
-        fetch(KIOSK_SERVER + '/api/stop', { method: 'POST' })
-            .then(() => hideModal())
-            .catch(() => hideModal());
+        hideModal(); // hideModal() will call /api/stop
     }
 
     function startStatusPolling() {
@@ -134,7 +136,7 @@
                 .then(response => response.json())
                 .then(status => {
                     if (!status.playing) {
-                        hideModal();
+                        hideModal(false); // Player already stopped
                     } else {
                         if (status.position !== undefined) {
                             lastKnownPosition = status.position;
@@ -159,7 +161,7 @@
                     }
                 })
                 .catch(() => {
-                    hideModal();
+                    hideModal(false); // Server unreachable
                 });
         }, 1000);
     }

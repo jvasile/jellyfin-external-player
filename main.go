@@ -248,34 +248,48 @@ func reportPlaybackStopped() {
 }
 
 // Get current playback position from mpv
-func getMpvPlaybackInfo() (position, duration float64, err error) {
+type MpvStatus struct {
+	Playing  bool
+	Paused   bool
+	Position float64
+	Duration float64
+}
+
+func getMpvPlaybackInfo() (MpvStatus, error) {
 	currentPlayerMu.Lock()
 	pipePath := mpvIPCPath
 	currentPlayerMu.Unlock()
 
 	if pipePath == "" {
-		return 0, 0, fmt.Errorf("no IPC path")
+		return MpvStatus{}, fmt.Errorf("no IPC path")
 	}
 
+	var status MpvStatus
+
+	// If we can query mpv, it's running
 	pos, err := queryMpvProperty(pipePath, "time-pos")
 	if err != nil {
-		return lastPosition, videoDuration, nil // Return cached values on error
+		return MpvStatus{}, err // Can't reach mpv
 	}
+	status.Playing = true
+
 	if p, ok := pos.(float64); ok {
-		position = p
+		status.Position = p
 		lastPosition = p
 	}
 
-	dur, err := queryMpvProperty(pipePath, "duration")
-	if err != nil {
-		return position, videoDuration, nil
-	}
+	dur, _ := queryMpvProperty(pipePath, "duration")
 	if d, ok := dur.(float64); ok {
-		duration = d
+		status.Duration = d
 		videoDuration = d
 	}
 
-	return position, duration, nil
+	paused, _ := queryMpvProperty(pipePath, "pause")
+	if p, ok := paused.(bool); ok {
+		status.Paused = p
+	}
+
+	return status, nil
 }
 
 func defaultConfig() Config {
@@ -617,23 +631,31 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	currentPlayerMu.Lock()
-	cmd := currentPlayer
 	itemId := playerItemId
 	currentPlayerMu.Unlock()
 
-	playing := cmd != nil
-
-	var position, duration float64
-	if playing {
-		position, duration, _ = getMpvPlaybackInfo()
-	}
+	// Query mpv for actual status
+	mpvStatus, err := getMpvPlaybackInfo()
 
 	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		// Can't reach mpv - not playing
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"playing":  false,
+			"paused":   false,
+			"itemId":   itemId,
+			"position": 0,
+			"duration": 0,
+		})
+		return
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"playing":  playing,
+		"playing":  mpvStatus.Playing,
+		"paused":   mpvStatus.Paused,
 		"itemId":   itemId,
-		"position": position,
-		"duration": duration,
+		"position": mpvStatus.Position,
+		"duration": mpvStatus.Duration,
 	})
 }
 
