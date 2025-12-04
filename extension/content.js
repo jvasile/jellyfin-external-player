@@ -223,6 +223,58 @@
         }
     }
 
+    // Hook into Emby/Jellyfin's playback system
+    function hookPlaybackManager() {
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+        // Try to intercept the PlaybackManager
+        function tryHook() {
+            if (win.PlaybackManager && win.PlaybackManager.play) {
+                const originalPlay = win.PlaybackManager.play.bind(win.PlaybackManager);
+                win.PlaybackManager.play = async function(options) {
+                    console.log('Embyfin Kiosk: Intercepted PlaybackManager.play', options);
+
+                    // Extract item ID from options
+                    let itemId = null;
+                    if (options && options.ids && options.ids.length > 0) {
+                        itemId = options.ids[0];
+                    } else if (options && options.items && options.items.length > 0) {
+                        itemId = options.items[0].Id;
+                    }
+
+                    if (itemId) {
+                        try {
+                            const path = await getItemPath(itemId);
+                            if (path) {
+                                console.log('Embyfin Kiosk: Playing externally', path);
+                                playInExternalPlayer(path);
+                                return; // Don't call original play
+                            }
+                        } catch (err) {
+                            console.error('Embyfin Kiosk: Error getting path, falling back to default player', err);
+                        }
+                    }
+
+                    // Fallback to original if we couldn't handle it
+                    return originalPlay(options);
+                };
+                console.log('Embyfin Kiosk: Hooked PlaybackManager.play');
+                return true;
+            }
+            return false;
+        }
+
+        // Try immediately, then retry a few times
+        if (!tryHook()) {
+            let attempts = 0;
+            const interval = setInterval(() => {
+                if (tryHook() || ++attempts > 20) {
+                    clearInterval(interval);
+                }
+            }, 500);
+        }
+    }
+
     // Initialize
     function init() {
         signalPresence();
@@ -230,6 +282,7 @@
             return;
         }
         console.log('Embyfin Kiosk: Initializing, platform:', detectPlatform());
+        hookPlaybackManager();
         attachPlayListeners();
         attachKeyboardShortcut();
     }
