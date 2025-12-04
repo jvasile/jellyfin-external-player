@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
@@ -51,7 +52,7 @@ var (
 
 func defaultConfig() Config {
 	return Config{
-		Port:   9999,
+		Port:   9998,
 		Player: "mpv",
 		Players: map[string]PlayerConfig{
 			"mpv": {Name: "mpv", Path: "mpv", Args: []string{"--fs"}},
@@ -482,13 +483,13 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 	serverURLs := config.ServerURLs
 	configMu.RUnlock()
 
-	var matchLines strings.Builder
+	var includeLines strings.Builder
 	if len(serverURLs) == 0 {
 		// Fallback if no servers configured
-		matchLines.WriteString("// @match        *://*/*\n")
+		includeLines.WriteString("// @include      *://*/*\n")
 	} else {
 		for _, url := range serverURLs {
-			matchLines.WriteString(fmt.Sprintf("// @match        %s\n", url))
+			includeLines.WriteString(fmt.Sprintf("// @include      %s\n", url))
 		}
 	}
 
@@ -499,13 +500,14 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 // @version      1.0.0
 // @description  Play Emby/Jellyfin videos in external player (mpv/VLC) via local server
 %s// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      localhost
 // @connect      127.0.0.1
 // ==/UserScript==
 
-`, matchLines.String())
+`, includeLines.String())
 
-	// Replacement function using GM_xmlhttpRequest
+	// Replace the play function with GM_xmlhttpRequest version
 	gmFunction := `    // ==PLAY_FUNCTION_START==
     // Send play request to local kiosk server via GM_xmlhttpRequest
     function playInExternalPlayer(path) {
@@ -529,7 +531,7 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
     }
     // ==PLAY_FUNCTION_END==`
 
-	// Replace the chrome.runtime.sendMessage version with GM_xmlhttpRequest version
+	// Replace the chrome.runtime.sendMessage version with fetch version
 	script := string(contentJS)
 
 	// Find and replace the function between markers
@@ -572,7 +574,101 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 		config.ServerURLsSet = true
 		saveConfigLocked()
 		configMu.Unlock()
-		http.Redirect(w, r, "/install?saved=1#userscript-content", http.StatusSeeOther)
+		http.Redirect(w, r, "/install/userscript?saved=1", http.StatusSeeOther)
+		return
+	}
+
+	// Redirect base /install to /install/extension
+	http.Redirect(w, r, "/install/extension", http.StatusSeeOther)
+}
+
+func installExtensionHandler(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Install Extension - Embyfin Kiosk</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; line-height: 1.6; }
+        h1 { margin-bottom: 30px; }
+        h3 { margin-top: 20px; color: #555; }
+        code { background: #f1f5f9; padding: 2px 8px; border-radius: 4px; font-size: 14px; }
+        a { color: #3b82f6; }
+        .browser-section { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .note { background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; }
+        .tabs { margin-bottom: 20px; }
+        .tabs a { display: inline-block; padding: 10px 20px; margin-right: 10px; border: 2px solid #3b82f6; border-radius: 8px; text-decoration: none; }
+        .tabs a.active { background: #3b82f6; color: white; }
+        ol { padding-left: 20px; }
+        li { margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Install Embyfin Kiosk</h1>
+
+    <div class="tabs">
+        <a href="/install/extension" class="active">Browser Extension</a>
+        <a href="/install/userscript">Userscript</a>
+    </div>
+
+    <p>Direct link: <code><a href="/extension.zip">http://localhost:9999/extension.zip</a></code></p>
+
+    <div class="browser-section">
+        <h3>Chrome / Edge / Brave</h3>
+        <ol>
+            <li>Download and extract the zip file</li>
+            <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>)</li>
+            <li>Enable "Developer mode" (toggle in top right)</li>
+            <li>Click "Load unpacked"</li>
+            <li>Select the extracted folder</li>
+        </ol>
+    </div>
+
+    <div class="browser-section">
+        <h3>Firefox</h3>
+        <ol>
+            <li>Download and extract the zip file</li>
+            <li>Open <code>about:debugging#/runtime/this-firefox</code></li>
+            <li>Click "Load Temporary Add-on"</li>
+            <li>Select any file in the extracted folder (e.g., manifest.json)</li>
+        </ol>
+        <div class="note">
+            <strong>Note:</strong> Temporary add-ons are removed when Firefox closes.
+        </div>
+    </div>
+
+    <h2>After Installation</h2>
+    <ol>
+        <li>Click the extension icon in your browser toolbar</li>
+        <li>Verify the server URL is <code>http://localhost:9999</code></li>
+        <li>Navigate to your Emby or Jellyfin server</li>
+        <li>Click play on any movie or episode, or press <strong>K</strong></li>
+    </ol>
+
+    <p style="margin-top: 40px;"><a href="/config">Configuration</a></p>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
+}
+
+func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
+	// Handle POST to save server URLs
+	if r.Method == "POST" {
+		r.ParseForm()
+		urls := r.Form["server_url"]
+		var filtered []string
+		for _, u := range urls {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				filtered = append(filtered, u)
+			}
+		}
+		configMu.Lock()
+		config.ServerURLs = filtered
+		config.ServerURLsSet = true
+		saveConfigLocked()
+		configMu.Unlock()
+		http.Redirect(w, r, "/install/userscript?saved=1", http.StatusSeeOther)
 		return
 	}
 
@@ -591,120 +687,37 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	savedMsg := ""
+	if r.URL.Query().Get("saved") == "1" {
+		savedMsg = `<span style="color: green; margin-left: 10px;">Saved!</span>`
+	}
+
 	html := `<!DOCTYPE html>
 <html>
 <head>
-    <title>Install Embyfin Kiosk</title>
+    <title>Install Userscript - Embyfin Kiosk</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; line-height: 1.6; }
         h1 { margin-bottom: 30px; }
-        h2 { margin-top: 30px; color: #333; }
         h3 { margin-top: 20px; color: #555; }
-        .download-btn {
-            display: inline-block;
-            padding: 15px 30px;
-            font-size: 18px;
-            background: #3b82f6;
-            color: white;
-            text-decoration: none;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        .download-btn:hover { background: #2563eb; }
-        .download-btn.secondary {
-            background: #10b981;
-        }
-        .download-btn.secondary:hover { background: #059669; }
-        ol { padding-left: 20px; }
+        code { background: #f1f5f9; padding: 2px 8px; border-radius: 4px; font-size: 14px; }
+        a { color: #3b82f6; }
+        .browser-section { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .tabs { margin-bottom: 20px; }
+        .tabs a { display: inline-block; padding: 10px 20px; margin-right: 10px; border: 2px solid #3b82f6; border-radius: 8px; text-decoration: none; }
+        .tabs a.active { background: #3b82f6; color: white; }
+        ol, ul { padding-left: 20px; }
         li { margin-bottom: 10px; }
-        code {
-            background: #f1f5f9;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        .browser-section {
-            background: #f9fafb;
-            padding: 20px;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        .note {
-            background: #fef3c7;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        .method-tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-        }
-        .method-tab {
-            padding: 10px 20px;
-            border: 2px solid #3b82f6;
-            border-radius: 8px;
-            cursor: pointer;
-            background: white;
-            font-size: 16px;
-        }
-        .method-tab.active {
-            background: #3b82f6;
-            color: white;
-        }
-        .method-content { display: none; }
-        .method-content.active { display: block; }
-        .url-input {
-            width: 100%;
-            padding: 8px;
-            margin: 5px 0;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-size: 14px;
-            box-sizing: border-box;
-        }
+        .url-input { width: 100%; padding: 8px; margin: 5px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
         .url-list { margin: 10px 0; }
-        .add-url-btn {
-            background: #e5e7eb;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 5px;
-        }
+        .add-url-btn { background: #e5e7eb; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 5px; }
         .add-url-btn:hover { background: #d1d5db; }
-        .save-btn {
-            background: #3b82f6;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 10px;
-        }
+        .save-btn { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
         .save-btn:hover { background: #2563eb; }
-        .success { color: green; margin-left: 10px; }
-        .discover-btn {
-            background: #8b5cf6;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-bottom: 15px;
-        }
+        .discover-btn { background: #8b5cf6; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-bottom: 15px; }
         .discover-btn:hover { background: #7c3aed; }
         .discover-btn:disabled { background: #c4b5fd; cursor: wait; }
-        .reset-btn {
-            background: #6b7280;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-left: 10px;
-            margin-bottom: 15px;
-        }
+        .reset-btn { background: #6b7280; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-left: 10px; margin-bottom: 15px; }
         .reset-btn:hover { background: #4b5563; }
         #discoverStatus { margin-left: 10px; color: #666; }
     </style>
@@ -712,112 +725,52 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 <body>
     <h1>Install Embyfin Kiosk</h1>
 
-    <div class="method-tabs">
-        <button class="method-tab active" onclick="showMethod('extension')">Browser Extension</button>
-        <button class="method-tab" onclick="showMethod('userscript')">Userscript</button>
+    <div class="tabs">
+        <a href="/install/extension">Browser Extension</a>
+        <a href="/install/userscript" class="active">Userscript</a>
     </div>
 
-    <div id="extension-content" class="method-content active">
-        <a href="/extension.zip" class="download-btn">Download Extension</a>
+    <div class="browser-section">
+        <h3>Step 1: Install a Userscript Manager</h3>
+        <p>If you don't already have one:</p>
+        <ul>
+            <li><strong>Tampermonkey</strong> - Chrome, Firefox, Edge, Safari</li>
+            <li><strong>Violentmonkey</strong> - Chrome, Firefox, Edge</li>
+            <li><strong>Greasemonkey</strong> - Firefox only</li>
+        </ul>
+    </div>
 
-        <div class="browser-section">
-            <h3>Chrome / Edge / Brave</h3>
-            <ol>
-                <li>Download and extract the zip file</li>
-                <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>)</li>
-                <li>Enable "Developer mode" (toggle in top right)</li>
-                <li>Click "Load unpacked"</li>
-                <li>Select the extracted folder</li>
-            </ol>
-        </div>
-
-        <div class="browser-section">
-            <h3>Firefox</h3>
-            <ol>
-                <li>Download and extract the zip file</li>
-                <li>Open <code>about:debugging#/runtime/this-firefox</code></li>
-                <li>Click "Load Temporary Add-on"</li>
-                <li>Select any file in the extracted folder (e.g., manifest.json)</li>
-            </ol>
-            <div class="note">
-                <strong>Note:</strong> Temporary add-ons are removed when Firefox closes.
-                For permanent installation, the extension needs to be signed by Mozilla.
+    <div class="browser-section">
+        <h3>Step 2: Configure Server URLs</h3>
+        <p>Enter the URLs of your Emby/Jellyfin servers, or discover them automatically.</p>
+        <button type="button" class="discover-btn" onclick="discoverServers()">Discover Servers</button>
+        <button type="button" class="reset-btn" onclick="resetToDiscovery()">Reset to Auto-Discovery</button>
+        <span id="discoverStatus"></span>
+        <form method="POST" id="urlForm">
+            <div class="url-list" id="urlList">
+                ` + urlInputs.String() + `
             </div>
-        </div>
-
-        <h2>After Installation</h2>
-        <ol>
-            <li>Click the extension icon in your browser toolbar</li>
-            <li>Verify the server URL is <code>http://localhost:9999</code></li>
-            <li>The status should show "Server running"</li>
-            <li>Navigate to your Emby or Jellyfin server</li>
-            <li>Click play on any movie or episode, or press <strong>K</strong></li>
-        </ol>
+            <button type="button" class="add-url-btn" onclick="addUrlInput()">+ Add Another Server</button>
+            <br>
+            <button type="submit" class="save-btn">Save URLs</button>
+            ` + savedMsg + `
+        </form>
     </div>
 
-    <div id="userscript-content" class="method-content">
-        <p>Userscripts work with a userscript manager like Tampermonkey, Violentmonkey, or Greasemonkey.</p>
-
-        <div class="browser-section">
-            <h3>Step 1: Install a Userscript Manager</h3>
-            <p>If you don't already have one, install a userscript manager for your browser:</p>
-            <ul>
-                <li><strong>Tampermonkey</strong> - Available for Chrome, Firefox, Edge, Safari</li>
-                <li><strong>Violentmonkey</strong> - Available for Chrome, Firefox, Edge</li>
-                <li><strong>Greasemonkey</strong> - Firefox only</li>
-            </ul>
-        </div>
-
-        <div class="browser-section">
-            <h3>Step 2: Configure Server URLs</h3>
-            <p>Enter the URLs of your Emby/Jellyfin servers, or discover them automatically.</p>
-            <button type="button" class="discover-btn" onclick="discoverServers()">Discover Servers</button>
-            <button type="button" class="reset-btn" onclick="resetToDiscovery()">Reset to Auto-Discovery</button>
-            <span id="discoverStatus"></span>
-            <form method="POST" id="urlForm">
-                <div class="url-list" id="urlList">
-                    ` + urlInputs.String() + `
-                </div>
-                <button type="button" class="add-url-btn" onclick="addUrlInput()">+ Add Another Server</button>
-                <br>
-                <button type="submit" class="save-btn">Save URLs</button>
-                <span class="success" id="savedMsg" style="display: none;">Saved!</span>
-            </form>
-        </div>
-
-        <div class="browser-section">
-            <h3>Step 3: Install the Userscript</h3>
-            <ol>
-                <li>Click the install button below</li>
-                <li>Your userscript manager should detect it and offer to install</li>
-                <li>Click "Install" or "Confirm"</li>
-            </ol>
-            <a href="/embyfin-kiosk.user.js" class="download-btn secondary">Install Userscript</a>
-        </div>
-
-        <div class="note" style="background: #f0f9ff;">
-            <strong>Tip:</strong> If you change the server URLs, reinstall the userscript to pick up the changes.
-        </div>
-
-        <h2>After Installation</h2>
-        <ol>
-            <li>Navigate to your Emby or Jellyfin server</li>
-            <li>Click play on any movie or episode, or press <strong>K</strong></li>
-        </ol>
+    <div class="browser-section">
+        <h3>Step 3: Install the Userscript</h3>
+        <p>Direct link (reload to reinstall): <code><a href="/embyfin-kiosk.user.js">http://localhost:9999/embyfin-kiosk.user.js</a></code></p>
     </div>
 
-    <p style="margin-top: 40px;">
-        <a href="/config">← Back to Configuration</a>
-    </p>
+    <h2>After Installation</h2>
+    <ol>
+        <li>Navigate to your Emby or Jellyfin server</li>
+        <li>Click play on any movie or episode, or press <strong>K</strong></li>
+    </ol>
+
+    <p style="margin-top: 40px;"><a href="/config">Configuration</a></p>
 
     <script>
-        function showMethod(method) {
-            document.querySelectorAll('.method-tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.method-content').forEach(c => c.classList.remove('active'));
-            document.querySelector('.method-tab[onclick*="' + method + '"]').classList.add('active');
-            document.getElementById(method + '-content').classList.add('active');
-        }
-
         function addUrlInput() {
             const input = document.createElement('input');
             input.type = 'text';
@@ -825,16 +778,6 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
             input.placeholder = 'http://myserver:8096/*';
             input.className = 'url-input';
             document.getElementById('urlList').appendChild(input);
-        }
-
-        // Show saved message and switch to userscript tab if redirected with ?saved=1
-        if (window.location.search.includes('saved=1')) {
-            showMethod('userscript');
-            document.getElementById('savedMsg').style.display = 'inline';
-            setTimeout(() => {
-                document.getElementById('savedMsg').style.display = 'none';
-                history.replaceState(null, '', '/install');
-            }, 3000);
         }
 
         async function discoverServers() {
@@ -845,31 +788,23 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
             status.textContent = 'Scanning network...';
             status.style.color = '#666';
 
-            // Start discovery
-            await fetch('/api/discover');
-
-            // Poll for results
-            let attempts = 0;
-            const maxAttempts = 8; // ~4 seconds
-
-            const poll = async () => {
-                attempts++;
+            try {
                 const response = await fetch('/api/discover');
                 const data = await response.json();
-
-                if (data.status === 'scanning' && attempts < maxAttempts) {
-                    setTimeout(poll, 500);
-                    return;
-                }
-
-                // Discovery complete
                 const servers = data.servers || [];
+
                 if (servers.length > 0) {
                     const urlList = document.getElementById('urlList');
                     const existing = new Set();
                     urlList.querySelectorAll('input').forEach(input => {
                         if (input.value) existing.add(input.value);
                     });
+
+                    // Remove empty placeholder if present
+                    const inputs = urlList.querySelectorAll('input');
+                    if (inputs.length === 1 && !inputs[0].value) {
+                        inputs[0].remove();
+                    }
 
                     let added = 0;
                     servers.forEach(server => {
@@ -891,34 +826,37 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
                     status.textContent = 'No servers found';
                     status.style.color = '#666';
                 }
+            } catch (err) {
+                status.textContent = 'Discovery failed: ' + err.message;
+                status.style.color = 'red';
+            }
 
-                btn.disabled = false;
-                setTimeout(() => { status.textContent = ''; }, 5000);
-            };
-
-            setTimeout(poll, 500);
+            btn.disabled = false;
+            setTimeout(() => { status.textContent = ''; }, 5000);
         }
 
-        // Check if servers were auto-discovered on page load
-        (async function checkAutoDiscovery() {
-            const response = await fetch('/api/discover');
+        // Check if startup auto-discovery is still running
+        (async function checkStartupDiscovery() {
+            const response = await fetch('/api/discover?status=1');
             const data = await response.json();
-            if (data.servers && data.servers.length > 0) {
-                const urlList = document.getElementById('urlList');
-                const inputs = urlList.querySelectorAll('input');
-                // Only auto-fill if the list is empty or has just the placeholder
-                if (inputs.length === 0 || (inputs.length === 1 && !inputs[0].value)) {
-                    if (inputs.length === 1) inputs[0].remove();
-                    data.servers.forEach(server => {
-                        const input = document.createElement('input');
-                        input.type = 'text';
-                        input.name = 'server_url';
-                        input.value = server.url;
-                        input.className = 'url-input';
-                        input.title = server.name + ' (' + server.platform + ')';
-                        urlList.appendChild(input);
-                    });
-                }
+
+            if (data.status === 'scanning') {
+                const status = document.getElementById('discoverStatus');
+                status.textContent = 'Auto-discovery in progress...';
+                status.style.color = '#666';
+                setTimeout(async () => {
+                    const r = await fetch('/api/discover?status=1');
+                    const d = await r.json();
+                    if (d.status === 'complete') {
+                        status.textContent = '';
+                        // Reload page to show discovered servers
+                        if (d.servers && d.servers.length > 0) {
+                            window.location.reload();
+                        }
+                    } else {
+                        checkStartupDiscovery();
+                    }
+                }, 500);
             }
         })();
 
@@ -1202,27 +1140,29 @@ func startBackgroundDiscovery() {
 func discoverHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Check if discovery is already running
-	discoveryMu.Lock()
-	running := discoveryRunning
-	cached := lastDiscovery
-	discoveryMu.Unlock()
+	// If just checking status (not starting new discovery)
+	if r.URL.Query().Get("status") == "1" {
+		discoveryMu.Lock()
+		running := discoveryRunning
+		discoveryMu.Unlock()
 
-	if running {
-		// Return cached results or empty while scanning
+		configMu.RLock()
+		urls := config.ServerURLs
+		configMu.RUnlock()
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "scanning",
-			"servers": cached,
+			"status":  map[bool]string{true: "scanning", false: "complete"}[running],
+			"servers": urls,
 		})
 		return
 	}
 
-	// Start async discovery
-	go runDiscovery(false) // Don't auto-update config from manual trigger
+	// Run discovery synchronously and return results
+	servers := runDiscovery(false)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "started",
-		"servers": cached,
+		"status":  "complete",
+		"servers": servers,
 	})
 }
 
@@ -1250,6 +1190,11 @@ func resetDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Parse command-line flags
+	var portFlag int
+	flag.IntVar(&portFlag, "port", 0, "Port to listen on (overrides config)")
+	flag.Parse()
+
 	// Determine config path (same directory as executable)
 	exe, err := os.Executable()
 	if err != nil {
@@ -1259,6 +1204,11 @@ func main() {
 
 	if err := loadConfig(); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Override port if specified on command line
+	if portFlag > 0 {
+		config.Port = portFlag
 	}
 
 	// Auto-discover servers on startup if not configured by user
@@ -1274,6 +1224,8 @@ func main() {
 	http.HandleFunc("/api/discover/reset", resetDiscoveryHandler)
 	http.HandleFunc("/config", configPageHandler)
 	http.HandleFunc("/install", installPageHandler)
+	http.HandleFunc("/install/extension", installExtensionHandler)
+	http.HandleFunc("/install/userscript", installUserscriptHandler)
 	http.HandleFunc("/extension.zip", extensionDownloadHandler)
 	http.HandleFunc("/embyfin-kiosk.user.js", userscriptHandler)
 

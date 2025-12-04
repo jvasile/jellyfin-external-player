@@ -61,10 +61,16 @@
 
     // Get authentication params
     function getAuthParams() {
-        if (window.ApiClient) {
-            const token = window.ApiClient.accessToken();
+        // Check both window and unsafeWindow (for userscript sandboxing)
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        if (win.ApiClient) {
+            const token = win.ApiClient.accessToken ? win.ApiClient.accessToken() : null;
             if (token) {
                 return `api_key=${encodeURIComponent(token)}`;
+            }
+            // Try alternate method - check for _serverInfo or credentials
+            if (win.ApiClient._serverInfo && win.ApiClient._serverInfo.AccessToken) {
+                return `api_key=${encodeURIComponent(win.ApiClient._serverInfo.AccessToken)}`;
             }
         }
         return '';
