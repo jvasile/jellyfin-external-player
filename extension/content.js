@@ -63,24 +63,35 @@
     function getAuthParams() {
         // Check both window and unsafeWindow (for userscript sandboxing)
         const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const params = [];
         if (win.ApiClient) {
             const token = win.ApiClient.accessToken ? win.ApiClient.accessToken() : null;
             if (token) {
-                return `api_key=${encodeURIComponent(token)}`;
+                params.push(`api_key=${encodeURIComponent(token)}`);
+            } else if (win.ApiClient._serverInfo && win.ApiClient._serverInfo.AccessToken) {
+                params.push(`api_key=${encodeURIComponent(win.ApiClient._serverInfo.AccessToken)}`);
             }
-            // Try alternate method - check for _serverInfo or credentials
-            if (win.ApiClient._serverInfo && win.ApiClient._serverInfo.AccessToken) {
-                return `api_key=${encodeURIComponent(win.ApiClient._serverInfo.AccessToken)}`;
+            // Add UserId if available
+            const userId = win.ApiClient.getCurrentUserId ? win.ApiClient.getCurrentUserId() : null;
+            if (userId) {
+                params.push(`UserId=${encodeURIComponent(userId)}`);
             }
         }
-        return '';
+        return params.join('&');
     }
 
     // Fetch item details from API
     async function getItemPath(itemId) {
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
         const apiBase = getApiBase();
-        const authParams = getAuthParams();
-        const url = `${window.location.origin}${apiBase}/Items/${itemId}?${authParams}`;
+        const userId = win.ApiClient && win.ApiClient.getCurrentUserId ? win.ApiClient.getCurrentUserId() : null;
+        const token = win.ApiClient && win.ApiClient.accessToken ? win.ApiClient.accessToken() : null;
+
+        if (!userId || !token) {
+            throw new Error('Not authenticated');
+        }
+
+        const url = `${window.location.origin}${apiBase}/Users/${userId}/Items/${itemId}?api_key=${encodeURIComponent(token)}`;
 
         const response = await fetch(url);
         if (!response.ok) {

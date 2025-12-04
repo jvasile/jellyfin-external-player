@@ -500,6 +500,7 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 // @version      1.0.0
 // @description  Play Emby/Jellyfin videos in external player (mpv/VLC) via local server
 %s// @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @grant        unsafeWindow
 // @connect      localhost
 // @connect      127.0.0.1
@@ -507,12 +508,12 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 
 `, includeLines.String())
 
-	// Replace the play function with GM_xmlhttpRequest version
+	// Replace the play function - support both GM_xmlhttpRequest and GM.xmlHttpRequest
 	gmFunction := `    // ==PLAY_FUNCTION_START==
-    // Send play request to local kiosk server via GM_xmlhttpRequest
+    // Send play request to local kiosk server
     function playInExternalPlayer(path) {
         const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
-        GM_xmlhttpRequest({
+        const opts = {
             method: 'GET',
             url: url,
             onload: function(response) {
@@ -527,7 +528,16 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
                 console.error('Embyfin Kiosk: Failed to connect', error);
                 alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
             }
-        });
+        };
+        // Support both Greasemonkey 4+ (GM.xmlHttpRequest) and older/Tampermonkey (GM_xmlhttpRequest)
+        if (typeof GM !== 'undefined' && GM.xmlHttpRequest) {
+            GM.xmlHttpRequest(opts);
+        } else if (typeof GM_xmlhttpRequest !== 'undefined') {
+            GM_xmlhttpRequest(opts);
+        } else {
+            console.error('Embyfin Kiosk: No GM_xmlhttpRequest available');
+            alert('Embyfin Kiosk: Userscript manager not supported');
+        }
     }
     // ==PLAY_FUNCTION_END==`
 
@@ -550,6 +560,15 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 	script = strings.Replace(script,
 		"// Content script injected into Emby/Jellyfin pages\n// This file is shared between the browser extension and userscript",
 		"// Embyfin Kiosk Userscript\n// Generated from extension/content.js",
+		1)
+
+	// Replace hardcoded port with configured port
+	configMu.RLock()
+	port := config.Port
+	configMu.RUnlock()
+	script = strings.Replace(script,
+		"const KIOSK_SERVER = 'http://localhost:9999'",
+		fmt.Sprintf("const KIOSK_SERVER = 'http://localhost:%d'", port),
 		1)
 
 	w.Header().Set("Content-Type", "application/javascript")
