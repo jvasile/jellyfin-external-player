@@ -276,15 +276,16 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
             <div class="mapping-row" data-index="%d">
                 <select name="mapping_type_%d" class="mapping-type">
                     <option value="prefix"%s>prefix</option>
+                    <option value="wildcard"%s>wildcard</option>
                     <option value="regex"%s>regex</option>
                 </select>
                 <input type="text" name="mapping_match_%d" value="%s" placeholder="Match pattern" class="mapping-match">
-                <span class="arrow">→</span>
+                <span class="arrow">&rarr;</span>
                 <input type="text" name="mapping_replace_%d" value="%s" placeholder="Replace with" class="mapping-replace">
-                <button type="button" class="remove-btn" onclick="removeMapping(this)">×</button>
+                <button type="button" class="remove-btn" onclick="removeMapping(this)">&times;</button>
             </div>`,
 				i, i,
-				selected(m.Type == "prefix"), selected(m.Type == "regex"),
+				selected(m.Type == "prefix"), selected(m.Type == "wildcard"), selected(m.Type == "regex"),
 				i, escapeHTML(m.Match),
 				i, escapeHTML(m.Replace)))
 		}
@@ -300,6 +301,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 		html := `<!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>Embyfin Kiosk Config</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; }
@@ -417,12 +419,13 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
             row.innerHTML = ` + "`" + `
                 <select name="mapping_type_${mappingIndex}" class="mapping-type">
                     <option value="prefix" selected>prefix</option>
+                    <option value="wildcard">wildcard</option>
                     <option value="regex">regex</option>
                 </select>
                 <input type="text" name="mapping_match_${mappingIndex}" placeholder="Match pattern" class="mapping-match">
-                <span class="arrow">→</span>
+                <span class="arrow">&rarr;</span>
                 <input type="text" name="mapping_replace_${mappingIndex}" placeholder="Replace with" class="mapping-replace">
-                <button type="button" class="remove-btn" onclick="removeMapping(this)">×</button>
+                <button type="button" class="remove-btn" onclick="removeMapping(this)">&times;</button>
             ` + "`" + `;
             container.appendChild(row);
             mappingIndex++;
@@ -455,6 +458,19 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 		player := r.FormValue("player")
 		if player != "mpv" && player != "vlc" {
 			player = "mpv"
+		}
+
+		// Check if player is on PATH
+		playerPath := player
+		configMu.RLock()
+		if pc, ok := config.Players[player]; ok && pc.Path != "" {
+			playerPath = pc.Path
+		}
+		configMu.RUnlock()
+
+		if _, err := exec.LookPath(playerPath); err != nil {
+			http.Error(w, fmt.Sprintf("Player '%s' not found on PATH. Please install it or configure a custom path.", playerPath), http.StatusBadRequest)
+			return
 		}
 
 		// Parse path mappings from form
