@@ -37,6 +37,7 @@ type Config struct {
 	Player       string                  `json:"player"` // "mpv" or "vlc"
 	Players      map[string]PlayerConfig `json:"players"`
 	PathMappings []PathMapping           `json:"path_mappings"`
+	ServerURLs   []string                `json:"server_urls"` // Emby/Jellyfin server URLs
 }
 
 var (
@@ -56,6 +57,10 @@ func defaultConfig() Config {
 		PathMappings: []PathMapping{
 			{Type: "prefix", Match: "/mnt/jbod/007/media/Movies", Replace: `\\172.16.50.28\Movies`},
 			{Type: "prefix", Match: "/mnt/jbod/007/media/TV", Replace: `\\172.16.50.28\TV`},
+		},
+		ServerURLs: []string{
+			"http://localhost:8096/*",
+			"http://localhost:8920/*",
 		},
 	}
 }
@@ -471,19 +476,33 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build @match directives from config
+	configMu.RLock()
+	serverURLs := config.ServerURLs
+	configMu.RUnlock()
+
+	var matchLines strings.Builder
+	if len(serverURLs) == 0 {
+		// Fallback if no servers configured
+		matchLines.WriteString("// @match        *://*/*\n")
+	} else {
+		for _, url := range serverURLs {
+			matchLines.WriteString(fmt.Sprintf("// @match        %s\n", url))
+		}
+	}
+
 	// Userscript header
-	header := `// ==UserScript==
+	header := fmt.Sprintf(`// ==UserScript==
 // @name         Embyfin Kiosk
 // @namespace    https://github.com/jvasile/embyfin-kiosk
 // @version      1.0.0
 // @description  Play Emby/Jellyfin videos in external player (mpv/VLC) via local server
-// @match        *://*/*
-// @grant        GM_xmlhttpRequest
+%s// @grant        GM_xmlhttpRequest
 // @connect      localhost
 // @connect      127.0.0.1
 // ==/UserScript==
 
-`
+`, matchLines.String())
 
 	// Replacement function using GM_xmlhttpRequest
 	gmFunction := `    // ==PLAY_FUNCTION_START==
@@ -535,6 +554,41 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func installPageHandler(w http.ResponseWriter, r *http.Request) {
+	// Handle POST to save server URLs
+	if r.Method == "POST" {
+		r.ParseForm()
+		urls := r.Form["server_url"]
+		// Filter empty URLs
+		var filtered []string
+		for _, u := range urls {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				filtered = append(filtered, u)
+			}
+		}
+		configMu.Lock()
+		config.ServerURLs = filtered
+		saveConfigLocked()
+		configMu.Unlock()
+		http.Redirect(w, r, "/install?saved=1#userscript-content", http.StatusSeeOther)
+		return
+	}
+
+	// Get current server URLs
+	configMu.RLock()
+	serverURLs := config.ServerURLs
+	configMu.RUnlock()
+
+	// Build URL inputs
+	var urlInputs strings.Builder
+	if len(serverURLs) == 0 {
+		urlInputs.WriteString(`<input type="text" name="server_url" placeholder="http://myserver:8096/*" class="url-input">`)
+	} else {
+		for _, u := range serverURLs {
+			urlInputs.WriteString(fmt.Sprintf(`<input type="text" name="server_url" value="%s" class="url-input">`, u))
+		}
+	}
+
 	html := `<!DOCTYPE html>
 <html>
 <head>
@@ -598,6 +652,36 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
         }
         .method-content { display: none; }
         .method-content.active { display: block; }
+        .url-input {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        .url-list { margin: 10px 0; }
+        .add-url-btn {
+            background: #e5e7eb;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        .add-url-btn:hover { background: #d1d5db; }
+        .save-btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .save-btn:hover { background: #2563eb; }
+        .success { color: green; margin-left: 10px; }
     </style>
 </head>
 <body>
@@ -649,8 +733,6 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
     <div id="userscript-content" class="method-content">
         <p>Userscripts work with a userscript manager like Tampermonkey, Violentmonkey, or Greasemonkey.</p>
 
-        <a href="/embyfin-kiosk.user.js" class="download-btn secondary">Install Userscript</a>
-
         <div class="browser-section">
             <h3>Step 1: Install a Userscript Manager</h3>
             <p>If you don't already have one, install a userscript manager for your browser:</p>
@@ -662,17 +744,31 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
         </div>
 
         <div class="browser-section">
-            <h3>Step 2: Install the Userscript</h3>
+            <h3>Step 2: Configure Server URLs</h3>
+            <p>Enter the URLs of your Emby/Jellyfin servers. Use <code>*</code> as a wildcard.</p>
+            <form method="POST" id="urlForm">
+                <div class="url-list" id="urlList">
+                    ` + urlInputs.String() + `
+                </div>
+                <button type="button" class="add-url-btn" onclick="addUrlInput()">+ Add Another Server</button>
+                <br>
+                <button type="submit" class="save-btn">Save URLs</button>
+                <span class="success" id="savedMsg" style="display: none;">Saved!</span>
+            </form>
+        </div>
+
+        <div class="browser-section">
+            <h3>Step 3: Install the Userscript</h3>
             <ol>
-                <li>Click the "Install Userscript" button above</li>
+                <li>Click the install button below</li>
                 <li>Your userscript manager should detect it and offer to install</li>
                 <li>Click "Install" or "Confirm"</li>
             </ol>
+            <a href="/embyfin-kiosk.user.js" class="download-btn secondary">Install Userscript</a>
         </div>
 
-        <div class="note">
-            <strong>Note:</strong> The userscript connects to <code>http://localhost:9999</code> by default.
-            To change this, edit the <code>KIOSK_SERVER</code> constant at the top of the script.
+        <div class="note" style="background: #f0f9ff;">
+            <strong>Tip:</strong> If you change the server URLs, reinstall the userscript to pick up the changes.
         </div>
 
         <h2>After Installation</h2>
@@ -692,6 +788,25 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
             document.querySelectorAll('.method-content').forEach(c => c.classList.remove('active'));
             document.querySelector('.method-tab[onclick*="' + method + '"]').classList.add('active');
             document.getElementById(method + '-content').classList.add('active');
+        }
+
+        function addUrlInput() {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.name = 'server_url';
+            input.placeholder = 'http://myserver:8096/*';
+            input.className = 'url-input';
+            document.getElementById('urlList').appendChild(input);
+        }
+
+        // Show saved message and switch to userscript tab if redirected with ?saved=1
+        if (window.location.search.includes('saved=1')) {
+            showMethod('userscript');
+            document.getElementById('savedMsg').style.display = 'inline';
+            setTimeout(() => {
+                document.getElementById('savedMsg').style.display = 'none';
+                history.replaceState(null, '', '/install');
+            }, 3000);
         }
     </script>
 </body>
