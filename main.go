@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,7 @@ type Config struct {
 	Player        string                  `json:"player"` // "mpv" or "vlc"
 	Players       map[string]PlayerConfig `json:"players"`
 	PathMappings  []PathMapping           `json:"path_mappings"`
+	URLEncode     bool                    `json:"url_encode"`      // URL-encode path when passing to player
 	ServerURLs    []string                `json:"server_urls"`     // Emby/Jellyfin server URLs
 	ServerURLsSet bool                    `json:"server_urls_set"` // true if user has explicitly set URLs
 }
@@ -163,7 +165,10 @@ func applyMapping(path string, mapping PathMapping) (string, bool) {
 			for i := 1; i < len(matches)-1; i++ {
 				result = strings.ReplaceAll(result, fmt.Sprintf("{%d}", i), matches[i])
 			}
-			// Append the remainder
+			// Append the remainder with proper path separator
+			if len(remainder) > 0 && !strings.HasSuffix(result, "/") && !strings.HasSuffix(result, `\`) {
+				result += "/"
+			}
 			return result + remainder, true
 		}
 		return path, false
@@ -223,6 +228,16 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	translatedPath := translatePath(path)
 	log.Printf("Playing: %s -> %s", path, translatedPath)
 
+	// Check for colons in SMB paths (indicates a problem)
+	if strings.HasPrefix(translatedPath, `\\`) {
+		// Find position after the server and share parts
+		// \\server\share\rest\of\path
+		parts := strings.SplitN(translatedPath[2:], `\`, 3)
+		if len(parts) >= 3 && strings.Contains(parts[2], ":") {
+			log.Printf("Warning: Colon in SMB path may cause issues: %s", translatedPath)
+		}
+	}
+
 	configMu.RLock()
 	playerKey := config.Player
 	playerConfig, ok := config.Players[playerKey]
@@ -233,8 +248,29 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		playerConfig = PlayerConfig{Path: "mpv", Args: []string{"--fs"}}
 	}
 
+	// URL-encode if configured (helps with special characters in paths)
+	configMu.RLock()
+	urlEncode := config.URLEncode
+	configMu.RUnlock()
+
+	pathForPlayer := translatedPath
+	if urlEncode {
+		pathForPlayer = url.PathEscape(translatedPath)
+	}
+
 	args := append([]string{}, playerConfig.Args...)
-	args = append(args, translatedPath)
+	args = append(args, pathForPlayer)
+
+	// Log the exact command line
+	cmdLine := playerConfig.Path
+	for _, arg := range args {
+		if strings.Contains(arg, " ") {
+			cmdLine += fmt.Sprintf(" %q", arg)
+		} else {
+			cmdLine += " " + arg
+		}
+	}
+	log.Printf("Command: %s", cmdLine)
 
 	cmd := exec.Command(playerConfig.Path, args...)
 	if err := cmd.Start(); err != nil {
@@ -273,6 +309,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 		configMu.RLock()
 		currentPlayer := config.Player
 		mappings := config.PathMappings
+		urlEncode := config.URLEncode
 		configMu.RUnlock()
 
 		// Build mapping rows HTML
@@ -302,6 +339,11 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 			playerVlcSelected = " selected"
 		} else {
 			playerMpvSelected = " selected"
+		}
+
+		urlEncodeChecked := ""
+		if urlEncode {
+			urlEncodeChecked = " checked"
 		}
 
 		html := `<!DOCTYPE html>
@@ -392,6 +434,14 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
                 <option value="mpv"` + playerMpvSelected + `>mpv</option>
                 <option value="vlc"` + playerVlcSelected + `>VLC</option>
             </select>
+        </div>
+
+        <div class="section">
+            <h2>Options</h2>
+            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal;">
+                <input type="checkbox" name="url_encode" value="1"` + urlEncodeChecked + `>
+                URL-encode paths when passing to player (for paths with special characters)
+            </label>
         </div>
 
         <div class="section">
@@ -527,9 +577,13 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Get URL encode checkbox
+		urlEncode := r.FormValue("url_encode") == "1"
+
 		configMu.Lock()
 		config.Player = player
 		config.PathMappings = mappings
+		config.URLEncode = urlEncode
 		err := saveConfigLocked()
 		configMu.Unlock()
 
