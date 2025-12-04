@@ -58,10 +58,7 @@ func defaultConfig() Config {
 			"mpv": {Name: "mpv", Path: "mpv", Args: []string{"--fs"}},
 			"vlc": {Name: "VLC", Path: "vlc", Args: []string{"--fullscreen"}},
 		},
-		PathMappings: []PathMapping{
-			{Type: "prefix", Match: "/mnt/jbod/007/media/Movies", Replace: `\\172.16.50.28\Movies`},
-			{Type: "prefix", Match: "/mnt/jbod/007/media/TV", Replace: `\\172.16.50.28\TV`},
-		},
+		PathMappings: []PathMapping{},
 		ServerURLs:    []string{}, // Will be populated by discovery
 		ServerURLsSet: false,
 	}
