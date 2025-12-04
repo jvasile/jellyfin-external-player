@@ -44,6 +44,7 @@ type Config struct {
 	URLEncode     bool                    `json:"url_encode"`      // URL-encode path when passing to player
 	ServerURLs    []string                `json:"server_urls"`     // Emby/Jellyfin server URLs
 	ServerURLsSet bool                    `json:"server_urls_set"` // true if user has explicitly set URLs
+	Debug         bool                    `json:"debug"`           // Enable verbose logging
 }
 
 var (
@@ -65,6 +66,16 @@ var (
 	embyUserId    string
 	embyToken     string
 )
+
+// debugLog logs a message only if debug mode is enabled
+func debugLog(format string, v ...interface{}) {
+	configMu.RLock()
+	debug := config.Debug
+	configMu.RUnlock()
+	if debug {
+		log.Printf("[DEBUG] "+format, v...)
+	}
+}
 
 // connectMpvIPC is defined in ipc_windows.go or ipc_unix.go
 
@@ -107,6 +118,26 @@ func queryMpvProperty(pipePath, property string) (interface{}, error) {
 		return data, nil
 	}
 	return nil, fmt.Errorf("no data in response")
+}
+
+// Send a command to mpv via IPC (e.g., "quit")
+func sendMpvCommand(pipePath, command string) error {
+	conn, err := connectMpvIPC(pipePath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+
+	cmd := map[string]interface{}{
+		"command": []interface{}{command},
+	}
+	cmdBytes, _ := json.Marshal(cmd)
+	cmdBytes = append(cmdBytes, '\n')
+
+	_, err = conn.Write(cmdBytes)
+	return err
 }
 
 // Query Emby for stored playback position
@@ -607,13 +638,28 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	debugLog("Stop request received")
+
 	currentPlayerMu.Lock()
 	cmd := currentPlayer
 	currentPlayerMu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
 		log.Printf("Stopping player (pid %d)", cmd.Process.Pid)
-		cmd.Process.Kill()
+		// Try to quit mpv gracefully via IPC first (handles launcher case)
+		currentPlayerMu.Lock()
+		pipePath := mpvIPCPath
+		currentPlayerMu.Unlock()
+		if pipePath != "" {
+			if err := sendMpvCommand(pipePath, "quit"); err != nil {
+				debugLog("IPC quit failed, falling back to kill: %v", err)
+				cmd.Process.Kill()
+			}
+		} else {
+			cmd.Process.Kill()
+		}
+	} else {
+		debugLog("Stop request: no player to stop (currentPlayer is nil)")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -631,15 +677,15 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	currentPlayerMu.Lock()
+	cmd := currentPlayer
 	itemId := playerItemId
 	currentPlayerMu.Unlock()
 
-	// Query mpv for actual status
-	mpvStatus, err := getMpvPlaybackInfo()
+	// Process running is the source of truth for "playing"
+	playing := cmd != nil
 
 	w.Header().Set("Content-Type", "application/json")
-	if err != nil {
-		// Can't reach mpv - not playing
+	if !playing {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"playing":  false,
 			"paused":   false,
@@ -650,8 +696,11 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try to get detailed status from mpv IPC (may fail, that's ok)
+	mpvStatus, _ := getMpvPlaybackInfo()
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"playing":  mpvStatus.Playing,
+		"playing":  true, // Process is running
 		"paused":   mpvStatus.Paused,
 		"itemId":   itemId,
 		"position": mpvStatus.Position,
@@ -680,6 +729,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 		currentPlayer := config.Player
 		mappings := config.PathMappings
 		urlEncode := config.URLEncode
+		debug := config.Debug
 		configMu.RUnlock()
 
 		// Build mapping rows HTML
@@ -714,6 +764,11 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 		urlEncodeChecked := ""
 		if urlEncode {
 			urlEncodeChecked = " checked"
+		}
+
+		debugChecked := ""
+		if debug {
+			debugChecked = " checked"
 		}
 
 		html := `<!DOCTYPE html>
@@ -811,6 +866,10 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
             <label style="display: flex; align-items: center; gap: 8px; font-weight: normal;">
                 <input type="checkbox" name="url_encode" value="1"` + urlEncodeChecked + `>
                 URL-encode paths when passing to player (for paths with special characters)
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; margin-top: 10px;">
+                <input type="checkbox" name="debug" value="1"` + debugChecked + `>
+                Enable debug logging (browser console and server log)
             </label>
         </div>
 
@@ -947,13 +1006,15 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Get URL encode checkbox
+		// Get checkboxes
 		urlEncode := r.FormValue("url_encode") == "1"
+		debug := r.FormValue("debug") == "1"
 
 		configMu.Lock()
 		config.Player = player
 		config.PathMappings = mappings
 		config.URLEncode = urlEncode
+		config.Debug = debug
 		err := saveConfigLocked()
 		configMu.Unlock()
 
@@ -1168,13 +1229,15 @@ func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Inject the server URL
+	// Inject config values
 	configMu.RLock()
 	port := config.Port
+	debug := config.Debug
 	configMu.RUnlock()
 
 	kioskServerURL := fmt.Sprintf("http://localhost:%d", port)
 	script := strings.Replace(string(scriptBytes), "{{KIOSK_SERVER}}", kioskServerURL, -1)
+	script = strings.Replace(script, "{{DEBUG}}", fmt.Sprintf("%t", debug), -1)
 
 	w.Write([]byte(script))
 }
@@ -1744,6 +1807,17 @@ func getDefaultLogPath() string {
 }
 
 
+// syncWriter wraps a file and syncs after each write for immediate log visibility
+type syncWriter struct {
+	f *os.File
+}
+
+func (w *syncWriter) Write(p []byte) (n int, err error) {
+	n, err = w.f.Write(p)
+	w.f.Sync()
+	return
+}
+
 func main() {
 	// Parse command-line flags
 	var portFlag int
@@ -1757,8 +1831,8 @@ func main() {
 		log.Printf("Warning: could not open log file %s: %v", logPath, err)
 	} else {
 		defer logFile.Close()
-		// Log to both file and stderr
-		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		// Log to both file and stderr, sync file after each write
+		log.SetOutput(io.MultiWriter(os.Stderr, &syncWriter{logFile}))
 		log.Printf("Logging to %s", logPath)
 	}
 

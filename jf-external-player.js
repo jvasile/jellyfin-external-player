@@ -4,10 +4,15 @@
 (function() {
     'use strict';
 
-    console.log('JF External Player: Script loaded');
-
     const KIOSK_SERVER = '{{KIOSK_SERVER}}';
+    const DEBUG = {{DEBUG}};
     const PREF_KEY_PREFIX = 'jf-external-player-';
+
+    function debugLog(...args) {
+        if (DEBUG) console.log('JF External Player:', ...args);
+    }
+
+    console.log('JF External Player: Script loaded. Server URL:', KIOSK_SERVER);
 
     // Modal state
     let modalElement = null;
@@ -102,6 +107,7 @@
     }
 
     function hideModal(stopPlayer = true) {
+        debugLog('hideModal called, stopPlayer:', stopPlayer);
         if (pollInterval) {
             clearInterval(pollInterval);
             pollInterval = null;
@@ -113,12 +119,16 @@
             statusElement = null;
         }
         if (stopPlayer) {
-            fetch(KIOSK_SERVER + '/api/stop', { method: 'POST' }).catch(() => {});
+            debugLog('Sending /api/stop request');
+            fetch(KIOSK_SERVER + '/api/stop', { method: 'POST' })
+                .then(() => debugLog('/api/stop succeeded'))
+                .catch(err => debugLog('/api/stop failed:', err));
         }
     }
 
     function handleModalKeydown(event) {
         if (event.key === 'Escape') {
+            debugLog('Escape key pressed');
             event.preventDefault();
             event.stopPropagation();
             stopPlayback();
@@ -126,6 +136,7 @@
     }
 
     function stopPlayback() {
+        debugLog('stopPlayback called');
         updateModalStatus('Stopping playback...');
         hideModal(); // hideModal() will call /api/stop
     }
@@ -136,6 +147,7 @@
                 .then(response => response.json())
                 .then(status => {
                     if (!status.playing) {
+                        debugLog('Status poll: playing=false, closing modal');
                         hideModal(false); // Player already stopped
                     } else {
                         if (status.position !== undefined) {
@@ -160,7 +172,8 @@
                         }
                     }
                 })
-                .catch(() => {
+                .catch(err => {
+                    debugLog('Status poll failed:', err);
                     hideModal(false); // Server unreachable
                 });
         }, 1000);
