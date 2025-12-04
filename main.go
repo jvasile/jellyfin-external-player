@@ -483,7 +483,14 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 	serverURLs := config.ServerURLs
 	configMu.RUnlock()
 
+	configMu.RLock()
+	port := config.Port
+	configMu.RUnlock()
+
 	var includeLines strings.Builder
+	// Always include the kiosk server pages for detection
+	includeLines.WriteString(fmt.Sprintf("// @include      http://localhost:%d/*\n", port))
+	includeLines.WriteString(fmt.Sprintf("// @include      http://127.0.0.1:%d/*\n", port))
 	if len(serverURLs) == 0 {
 		// Fallback if no servers configured
 		includeLines.WriteString("// @include      *://*/*\n")
@@ -782,6 +789,7 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
         <h3>Step 3: Install the Userscript</h3>
         <a href="/embyfin-kiosk.user.js" class="install-btn">Install Userscript</a>
         <p style="margin-top: 10px; font-size: 13px; color: #666;">If you change the server URLs, reinstall the userscript to pick up the changes.</p>
+        <div id="installStatus" style="margin-top: 15px;"></div>
     </div>
 
     <h2>After Installation</h2>
@@ -901,6 +909,21 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
             // Now run discovery
             discoverServers();
         }
+
+        // Check if userscript is installed
+        (function checkInstalled() {
+            const statusDiv = document.getElementById('installStatus');
+            // Listen for event from userscript
+            document.addEventListener('embyfin-kiosk-installed', function() {
+                statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">✓ Userscript is installed and active</span>';
+            });
+            // Also check window flag after a short delay
+            setTimeout(() => {
+                if (window.embyfinKioskInstalled) {
+                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">✓ Userscript is installed and active</span>';
+                }
+            }, 500);
+        })();
     </script>
 </body>
 </html>`

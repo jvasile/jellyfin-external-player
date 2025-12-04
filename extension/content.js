@@ -206,8 +206,23 @@
         });
     }
 
+    // Check if we're on the kiosk server pages (for detection)
+    function isKioskPage() {
+        return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    }
+
+    // Signal presence to kiosk pages
+    function signalPresence() {
+        if (isKioskPage()) {
+            // Set a flag that the page can detect
+            window.embyfinKioskInstalled = true;
+            document.dispatchEvent(new CustomEvent('embyfin-kiosk-installed'));
+        }
+    }
+
     // Initialize
     function init() {
+        signalPresence();
         if (!isEmbyfinPage()) {
             return;
         }
