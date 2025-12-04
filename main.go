@@ -58,7 +58,10 @@ func defaultConfig() Config {
 			"mpv": {Name: "mpv", Path: "mpv", Args: []string{"--fs"}},
 			"vlc": {Name: "VLC", Path: "vlc", Args: []string{"--fullscreen"}},
 		},
-		PathMappings: []PathMapping{},
+		PathMappings: []PathMapping{
+			{Type: "prefix", Match: "", Replace: ""},
+			{Type: "prefix", Match: "", Replace: ""},
+		},
 		ServerURLs:    []string{}, // Will be populated by discovery
 		ServerURLsSet: false,
 	}
@@ -367,6 +370,8 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
         #mappingsContainer { margin-top: 15px; }
         .example { background: #f0f9ff; padding: 12px; border-radius: 4px; margin-top: 15px; font-size: 13px; }
         .example code { background: #e0f2fe; padding: 2px 6px; border-radius: 3px; }
+        .warning { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 15px; border-radius: 8px; margin-top: 30px; }
+        .warning a { color: #92400e; font-weight: 500; }
     </style>
 </head>
 <body>
@@ -401,9 +406,10 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
         <span class="success" id="savedMsg" style="display: none;">Saved!</span>
     </form>
 
-    <p style="margin-top: 30px;">
-        <a href="/install">Install Browser Extension</a>
-    </p>
+    <div id="installWarning" class="warning" style="display: none;">
+        <strong>Warning!</strong> No browser extension or userscript detected.
+        <a href="/install">Please install.</a>
+    </div>
 
     <script>
         let mappingIndex = ` + fmt.Sprintf("%d", len(mappings)) + `;
@@ -440,6 +446,18 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
                 history.replaceState(null, '', '/config');
             }, 3000);
         }
+
+        // Check for extension/userscript
+        (function checkInstalled() {
+            document.addEventListener('embyfin-kiosk-installed', function() {
+                document.getElementById('installWarning').style.display = 'none';
+            });
+            setTimeout(() => {
+                if (!window.embyfinKioskInstalled) {
+                    document.getElementById('installWarning').style.display = 'block';
+                }
+            }, 1000);
+        })();
     </script>
 </body>
 </html>`
