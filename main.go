@@ -397,12 +397,9 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 
             <button type="button" class="add-btn" onclick="addMapping()">+ Add Mapping</button>
 
-            <div class="example">
-                <strong>Example:</strong> To map <code>nfs://192.168.1.28/mnt/media/Movies</code> to <code>\\server\Movies</code><br>
-                Type: <code>prefix</code>, Match: <code>nfs://192.168.1.28/mnt/media/Movies</code>, Replace: <code>\\server\Movies</code>
-            </div>
             <div class="tip">
                 <strong>Tip:</strong> To find the path Emby uses, go to any video, click the three dots menu, then "Edit metadata". The file path is shown there.
+                <a href="/help/mappings">See mapping examples &rarr;</a>
             </div>
         </div>
 
@@ -548,6 +545,106 @@ func configAPIHandler(w http.ResponseWriter, r *http.Request) {
 	defer configMu.RUnlock()
 
 	json.NewEncoder(w).Encode(config)
+}
+
+func helpMappingsHandler(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Path Mapping Help - Embyfin Kiosk</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; line-height: 1.6; }
+        h1 { margin-bottom: 10px; }
+        h2 { margin-top: 30px; color: #333; }
+        h3 { margin-top: 20px; color: #555; }
+        code { background: #f1f5f9; padding: 2px 8px; border-radius: 4px; font-size: 14px; }
+        pre { background: #f1f5f9; padding: 15px; border-radius: 8px; overflow-x: auto; }
+        .example { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 15px 0; }
+        .example-title { font-weight: 600; margin-bottom: 10px; }
+        .arrow { color: #666; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+        th, td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; }
+        th { background: #f9fafb; }
+        a { color: #3b82f6; }
+    </style>
+</head>
+<body>
+    <h1>Path Mapping Help</h1>
+    <p><a href="/config">&larr; Back to Configuration</a></p>
+
+    <p>Path mappings transform media file paths from your Emby/Jellyfin server to Windows-accessible paths.</p>
+
+    <h2>Mapping Types</h2>
+
+    <h3>1. Prefix (Recommended)</h3>
+    <p>Simple string replacement. If the path starts with the match pattern, replace that prefix.</p>
+    <div class="example">
+        <div class="example-title">Example: NFS path to Windows share</div>
+        <table>
+            <tr><th>Type</th><td><code>prefix</code></td></tr>
+            <tr><th>Match</th><td><code>nfs://192.168.1.28/mnt/jbod/007/media/Movies</code></td></tr>
+            <tr><th>Replace</th><td><code>\\172.16.50.28\Movies</code></td></tr>
+        </table>
+        <p>
+            <code>nfs://192.168.1.28/mnt/jbod/007/media/Movies/Inception/Inception.mkv</code><br>
+            <span class="arrow">&darr;</span><br>
+            <code>\\172.16.50.28\Movies\Inception\Inception.mkv</code>
+        </p>
+    </div>
+
+    <h3>2. Wildcard</h3>
+    <p>Pattern matching with wildcards. Use <code>*</code> to match a single path segment, <code>**</code> to match any number of segments.</p>
+    <table>
+        <tr><th>Pattern</th><th>Matches</th></tr>
+        <tr><td><code>*</code></td><td>Any characters except <code>/</code></td></tr>
+        <tr><td><code>**</code></td><td>Any characters including <code>/</code></td></tr>
+    </table>
+    <p>Use <code>{1}</code>, <code>{2}</code>, etc. in the replacement to reference captured groups.</p>
+    <div class="example">
+        <div class="example-title">Example: Match any server, capture the rest</div>
+        <table>
+            <tr><th>Type</th><td><code>wildcard</code></td></tr>
+            <tr><th>Match</th><td><code>nfs://*/mnt/jbod/007/media/Movies/**</code></td></tr>
+            <tr><th>Replace</th><td><code>\\172.16.50.28\Movies\{2}</code></td></tr>
+        </table>
+        <p>
+            <code>nfs://192.168.1.28/mnt/jbod/007/media/Movies/Inception/Inception.mkv</code><br>
+            <span class="arrow">&darr;</span><br>
+            <code>\\172.16.50.28\Movies\Inception/Inception.mkv</code>
+        </p>
+        <p><small>Note: <code>{1}</code> = <code>192.168.1.28</code>, <code>{2}</code> = <code>Inception/Inception.mkv</code></small></p>
+    </div>
+
+    <h3>3. Regex</h3>
+    <p>Full regular expression support. Use <code>$1</code>, <code>$2</code>, etc. for backreferences.</p>
+    <div class="example">
+        <div class="example-title">Example: Complex pattern with regex</div>
+        <table>
+            <tr><th>Type</th><td><code>regex</code></td></tr>
+            <tr><th>Match</th><td><code>nfs://[^/]+/mnt/jbod/\d+/media/(Movies|TV)/(.*)</code></td></tr>
+            <tr><th>Replace</th><td><code>\\172.16.50.28\$1\$2</code></td></tr>
+        </table>
+        <p>
+            <code>nfs://192.168.1.28/mnt/jbod/007/media/Movies/Inception/Inception.mkv</code><br>
+            <span class="arrow">&darr;</span><br>
+            <code>\\172.16.50.28\Movies\Inception/Inception.mkv</code>
+        </p>
+    </div>
+
+    <h2>Tips</h2>
+    <ul>
+        <li>Start with <strong>prefix</strong> mappings - they're the simplest and fastest.</li>
+        <li>Create separate mappings for Movies and TV if they're in different shares.</li>
+        <li>Forward slashes in the remaining path are automatically converted to backslashes.</li>
+        <li>Test your mappings by clicking play and checking the server console output.</li>
+    </ul>
+
+    <p style="margin-top: 40px;"><a href="/config">&larr; Back to Configuration</a></p>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
 }
 
 func extensionDownloadHandler(w http.ResponseWriter, r *http.Request) {
@@ -1387,6 +1484,7 @@ func main() {
 	http.HandleFunc("/api/discover", discoverHandler)
 	http.HandleFunc("/api/discover/reset", resetDiscoveryHandler)
 	http.HandleFunc("/config", configPageHandler)
+	http.HandleFunc("/help/mappings", helpMappingsHandler)
 	http.HandleFunc("/install", installPageHandler)
 	http.HandleFunc("/install/extension", installExtensionHandler)
 	http.HandleFunc("/install/userscript", installUserscriptHandler)

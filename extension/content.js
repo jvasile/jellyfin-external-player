@@ -154,11 +154,14 @@
             return;
         }
 
+        // Prevent default immediately, before async operations
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+
         try {
             const path = await getItemPath(itemId);
             if (path) {
-                event.preventDefault();
-                event.stopPropagation();
                 console.log('Embyfin Kiosk: Playing', path);
                 playInExternalPlayer(path);
             }
