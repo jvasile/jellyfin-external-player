@@ -16,23 +16,203 @@
 
     const KIOSK_SERVER = 'http://localhost:{{PORT}}';
 
+    // Modal state
+    let modalElement = null;
+    let statusElement = null;
+    let pollInterval = null;
+
+    // Create and show the modal overlay
+    function showModal(message) {
+        if (modalElement) return; // Already showing
+
+        modalElement = document.createElement('div');
+        modalElement.id = 'embyfin-kiosk-modal';
+        modalElement.innerHTML = `
+            <style>
+                #embyfin-kiosk-modal {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(0, 0, 0, 0.85);
+                    z-index: 999999;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                #embyfin-kiosk-modal .modal-box {
+                    background: #1a1a1a;
+                    border: 1px solid #333;
+                    border-radius: 8px;
+                    padding: 40px 60px;
+                    text-align: center;
+                    color: #fff;
+                    font-family: system-ui, sans-serif;
+                    max-width: 500px;
+                }
+                #embyfin-kiosk-modal .modal-title {
+                    font-size: 24px;
+                    margin-bottom: 20px;
+                }
+                #embyfin-kiosk-modal .modal-status {
+                    font-size: 16px;
+                    color: #aaa;
+                    margin-bottom: 30px;
+                }
+                #embyfin-kiosk-modal .modal-hint {
+                    font-size: 13px;
+                    color: #666;
+                }
+                #embyfin-kiosk-modal .modal-error {
+                    color: #ff6b6b;
+                }
+                #embyfin-kiosk-modal .spinner {
+                    width: 40px;
+                    height: 40px;
+                    border: 3px solid #333;
+                    border-top-color: #00a4dc;
+                    border-radius: 50%;
+                    animation: spin 1s linear infinite;
+                    margin: 0 auto 20px;
+                }
+                @keyframes spin {
+                    to { transform: rotate(360deg); }
+                }
+            </style>
+            <div class="modal-box">
+                <div class="spinner"></div>
+                <div class="modal-title">Playing in External Player</div>
+                <div class="modal-status">${message}</div>
+                <div class="modal-hint">Press <strong>Escape</strong> to stop playback and return to Emby</div>
+            </div>
+        `;
+        document.body.appendChild(modalElement);
+        statusElement = modalElement.querySelector('.modal-status');
+
+        // Listen for escape key
+        document.addEventListener('keydown', handleModalKeydown);
+
+        // Start polling for status
+        startStatusPolling();
+    }
+
+    // Update the modal status message
+    function updateModalStatus(message, isError) {
+        if (statusElement) {
+            statusElement.textContent = message;
+            if (isError) {
+                statusElement.classList.add('modal-error');
+            } else {
+                statusElement.classList.remove('modal-error');
+            }
+        }
+    }
+
+    // Hide and cleanup the modal
+    function hideModal() {
+        if (pollInterval) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+        }
+        document.removeEventListener('keydown', handleModalKeydown);
+        if (modalElement) {
+            modalElement.remove();
+            modalElement = null;
+            statusElement = null;
+        }
+    }
+
+    // Handle escape key to stop playback
+    function handleModalKeydown(event) {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            stopPlayback();
+        }
+    }
+
+    // Stop the external player
+    function stopPlayback() {
+        updateModalStatus('Stopping playback...');
+        const opts = {
+            method: 'POST',
+            url: KIOSK_SERVER + '/api/stop',
+            onload: function(response) {
+                hideModal();
+            },
+            onerror: function(error) {
+                hideModal();
+            }
+        };
+        if (typeof GM !== 'undefined' && GM.xmlHttpRequest) {
+            GM.xmlHttpRequest(opts);
+        } else if (typeof GM_xmlhttpRequest !== 'undefined') {
+            GM_xmlhttpRequest(opts);
+        } else {
+            hideModal();
+        }
+    }
+
+    // Poll the server for playback status
+    function startStatusPolling() {
+        pollInterval = setInterval(() => {
+            const opts = {
+                method: 'GET',
+                url: KIOSK_SERVER + '/api/status',
+                onload: function(response) {
+                    if (response.status === 200) {
+                        try {
+                            const status = JSON.parse(response.responseText);
+                            if (!status.playing) {
+                                // Playback ended
+                                hideModal();
+                            } else if (status.position !== undefined) {
+                                const mins = Math.floor(status.position / 60);
+                                const secs = Math.floor(status.position % 60);
+                                updateModalStatus(`Playing... ${mins}:${secs.toString().padStart(2, '0')}`);
+                            }
+                        } catch (e) {
+                            console.error('Embyfin Kiosk: Error parsing status', e);
+                        }
+                    }
+                },
+                onerror: function() {
+                    // Server not responding, assume playback stopped
+                    hideModal();
+                }
+            };
+            if (typeof GM !== 'undefined' && GM.xmlHttpRequest) {
+                GM.xmlHttpRequest(opts);
+            } else if (typeof GM_xmlhttpRequest !== 'undefined') {
+                GM_xmlhttpRequest(opts);
+            }
+        }, 1000);
+    }
+
     // Send play request to local kiosk server
-    function playInExternalPlayer(path) {
-        const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
+    function playInExternalPlayer(path, itemId) {
+        // Show modal immediately
+        showModal('Launching player...');
+
+        const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path) +
+                    (itemId ? '&itemId=' + encodeURIComponent(itemId) : '');
         const opts = {
             method: 'GET',
             url: url,
             onload: function(response) {
                 if (response.status === 200) {
                     console.log('Embyfin Kiosk: Playing in external player');
+                    updateModalStatus('Playing...');
                 } else {
                     console.error('Embyfin Kiosk: Server error', response.status);
-                    alert('Embyfin Kiosk: Server returned error ' + response.status);
+                    updateModalStatus('Server error: ' + response.status, true);
+                    setTimeout(hideModal, 3000);
                 }
             },
             onerror: function(error) {
                 console.error('Embyfin Kiosk: Failed to connect', error);
-                alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
+                updateModalStatus('Could not connect to server. Is embyfin-kiosk.exe running?', true);
+                setTimeout(hideModal, 3000);
             }
         };
         // Support both Greasemonkey 4+ (GM.xmlHttpRequest) and older/Tampermonkey (GM_xmlhttpRequest)
@@ -42,7 +222,8 @@
             GM_xmlhttpRequest(opts);
         } else {
             console.error('Embyfin Kiosk: No GM_xmlhttpRequest available');
-            alert('Embyfin Kiosk: Userscript manager not supported');
+            updateModalStatus('Userscript manager not supported', true);
+            setTimeout(hideModal, 3000);
         }
     }
 
@@ -217,7 +398,7 @@
             const path = await getItemPath(itemId);
             if (path) {
                 console.log('Embyfin Kiosk: Playing', path);
-                playInExternalPlayer(path);
+                playInExternalPlayer(path, itemId);
             }
         } catch (err) {
             console.error('Embyfin Kiosk: Error getting item path', err);
@@ -253,7 +434,7 @@
                         const path = await getItemPath(urlMatch[1]);
                         if (path) {
                             console.log('Embyfin Kiosk: Playing via keyboard shortcut', path);
-                            playInExternalPlayer(path);
+                            playInExternalPlayer(path, urlMatch[1]);
                         }
                     } catch (err) {
                         console.error('Embyfin Kiosk: Error', err);
@@ -366,7 +547,7 @@
                 const path = await getItemPath(itemId);
                 if (path) {
                     console.log('Embyfin Kiosk: Playing externally', path);
-                    playInExternalPlayer(path);
+                    playInExternalPlayer(path, itemId);
                 }
             } catch (err) {
                 console.error('Embyfin Kiosk: Error getting path', err);

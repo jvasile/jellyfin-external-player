@@ -52,6 +52,13 @@ var (
 	configMu   sync.RWMutex
 )
 
+// Player state tracking
+var (
+	currentPlayer   *exec.Cmd
+	currentPlayerMu sync.Mutex
+	playerItemId    string
+)
+
 func defaultConfig() Config {
 	return Config{
 		Port:   9998,
@@ -225,6 +232,8 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	itemId := r.URL.Query().Get("itemId")
+
 	translatedPath := translatePath(path)
 	log.Printf("Playing: %s -> %s", path, translatedPath)
 
@@ -279,13 +288,75 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Don't wait for the player to finish
-	go cmd.Wait()
+	// Track the current player process
+	currentPlayerMu.Lock()
+	currentPlayer = cmd
+	playerItemId = itemId
+	currentPlayerMu.Unlock()
+
+	// Wait for the player to finish in background
+	go func() {
+		cmd.Wait()
+		currentPlayerMu.Lock()
+		if currentPlayer == cmd {
+			currentPlayer = nil
+			playerItemId = ""
+		}
+		currentPlayerMu.Unlock()
+		log.Printf("Player exited")
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "playing",
 		"path":   translatedPath,
+	})
+}
+
+func stopHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	currentPlayerMu.Lock()
+	cmd := currentPlayer
+	currentPlayerMu.Unlock()
+
+	if cmd != nil && cmd.Process != nil {
+		log.Printf("Stopping player (pid %d)", cmd.Process.Pid)
+		cmd.Process.Kill()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+}
+
+func statusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	currentPlayerMu.Lock()
+	cmd := currentPlayer
+	itemId := playerItemId
+	currentPlayerMu.Unlock()
+
+	playing := cmd != nil
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"playing": playing,
+		"itemId":  itemId,
 	})
 }
 
@@ -1496,6 +1567,8 @@ func main() {
 
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/api/play", playHandler)
+	http.HandleFunc("/api/stop", stopHandler)
+	http.HandleFunc("/api/status", statusHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
 	http.HandleFunc("/api/discover", discoverHandler)
 	http.HandleFunc("/api/discover/reset", resetDiscoveryHandler)
