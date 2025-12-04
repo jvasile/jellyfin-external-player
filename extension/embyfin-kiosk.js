@@ -392,23 +392,36 @@
 
     // Add click listeners to play buttons
     function attachPlayListeners() {
-        const resumeSelectors = [
-            '[data-action="resume"]',
-            '.btnResume'
-        ];
+        // Only .btnPlay explicitly means "play from beginning"
+        const playFromBeginningSelectors = ['.btnPlay'];
         const playSelectors = [
             '.btnPlay',
+            '.btnResume',
             '.playButton',
             'button[data-action="play"]',
+            '[data-action="resume"]',
             '.detailButton-primary',
-            ...resumeSelectors
+            '.cardOverlayPlayButton',
+            '.itemAction[data-action="play"]',
+            '.actionSheetItemText' // Context menu items
         ];
 
         document.addEventListener('click', function(event) {
             const target = event.target.closest(playSelectors.join(','));
             if (target) {
-                // btnResume -> resume, btnPlay -> play from beginning
-                const isResume = event.target.closest(resumeSelectors.join(',')) !== null;
+                // Check if this is a context menu "Play" item
+                const actionSheetItem = event.target.closest('.actionSheetItemText');
+                if (actionSheetItem) {
+                    const text = actionSheetItem.textContent.trim().toLowerCase();
+                    if (text !== 'play' && text !== 'resume') {
+                        return; // Not a play action, let it through
+                    }
+                }
+
+                // Default to resume (check for saved position)
+                // Only .btnPlay means "play from beginning"
+                const isPlayFromBeginning = event.target.closest(playFromBeginningSelectors.join(',')) !== null;
+                const isResume = !isPlayFromBeginning;
                 handlePlayClick(event, isResume);
             }
         }, true);
@@ -424,7 +437,7 @@
                         const path = await getItemPath(urlMatch[1]);
                         if (path) {
                             console.log('Embyfin Kiosk: Playing via keyboard shortcut', path);
-                            playInExternalPlayer(path, urlMatch[1]);
+                            playInExternalPlayer(path, urlMatch[1], true); // Resume by default
                         }
                     } catch (err) {
                         console.error('Embyfin Kiosk: Error', err);
@@ -470,13 +483,10 @@
                     }
 
                     if (itemId) {
-                        // Check for resume position - if startPositionTicks > 0, it's a resume
-                        let startPositionTicks = 0;
-                        let isResume = false;
-                        if (options && options.startPositionTicks && options.startPositionTicks > 0) {
-                            startPositionTicks = options.startPositionTicks;
-                            isResume = true;
-                        }
+                        // Default to resume (check for saved position)
+                        // The server will query Emby for the position if resume=true
+                        let startPositionTicks = options && options.startPositionTicks ? options.startPositionTicks : 0;
+                        let isResume = true; // Default to resume
                         console.log('Embyfin Kiosk: startPositionTicks =', startPositionTicks, 'isResume =', isResume);
 
                         // Dispatch event for userscript to handle
@@ -544,7 +554,8 @@
         document.addEventListener('embyfin-kiosk-play', async function(e) {
             const itemId = e.detail.itemId;
             const startPositionTicks = e.detail.startPositionTicks || 0;
-            const isResume = e.detail.isResume || false;
+            // Default to resume unless we know it's play from beginning
+            const isResume = e.detail.isResume !== false;
             console.log('Embyfin Kiosk: Received play event for', itemId, 'startPositionTicks:', startPositionTicks, 'isResume:', isResume);
             try {
                 const path = await getItemPath(itemId);
@@ -568,6 +579,120 @@
         hookPlaybackManager();
         attachPlayListeners();
         attachKeyboardShortcut();
+        interceptVideoPlayback();
+    }
+
+    // Intercept all video playback by overriding HTMLVideoElement.play
+    function interceptVideoPlayback() {
+        // Listen for intercept messages (using postMessage to cross script boundaries)
+        window.addEventListener('message', async function(e) {
+            if (e.data && e.data.type === 'embyfin-kiosk-intercept') {
+                const itemId = e.data.itemId;
+                const src = e.data.src;
+                console.log('Embyfin Kiosk: Handling intercept, itemId:', itemId, 'src:', src);
+
+                // Hide any video player UI
+                document.querySelectorAll('.videoPlayerContainer, .videoOsdBottom, .videoOsd').forEach(el => {
+                    el.style.display = 'none';
+                });
+
+                // Go back
+                history.back();
+
+                if (itemId) {
+                    try {
+                        const path = await getItemPath(itemId);
+                        console.log('Embyfin Kiosk: Got path:', path);
+                        if (path) {
+                            playInExternalPlayer(path, itemId, true);
+                        } else {
+                            console.error('Embyfin Kiosk: No path returned for item', itemId);
+                        }
+                    } catch (err) {
+                        console.error('Embyfin Kiosk: Error getting path:', err);
+                    }
+                } else {
+                    console.error('Embyfin Kiosk: No itemId found to play');
+                }
+            }
+        });
+
+        // Inject into page context to override prototype
+        const script = document.createElement('script');
+        script.textContent = `
+        (function() {
+            let intercepting = false;
+            const originalPlay = HTMLVideoElement.prototype.play;
+
+            HTMLVideoElement.prototype.play = function() {
+                const src = this.src || '';
+                console.log('Embyfin Kiosk: Video.play() intercepted, src:', src);
+
+                if (intercepting) {
+                    return Promise.reject(new Error('Intercepted by Embyfin Kiosk'));
+                }
+
+                // Check if this looks like Emby video playback
+                if (src.includes('blob:') || src.includes('/emby/') || src.includes('/Videos/')) {
+                    intercepting = true;
+
+                    // Try to get item ID from multiple sources
+                    let itemId = null;
+
+                    // From video src (e.g., /emby/Videos/12345/stream or /Videos/12345/...)
+                    const srcMatch = src.match(/\\/Videos\\/([0-9]+)[\\/\\?]/i);
+                    if (srcMatch) itemId = srcMatch[1];
+
+                    // From URL hash (id=12345 or itemId=12345)
+                    if (!itemId) {
+                        const urlMatch = window.location.hash.match(/(?:id|itemId)=([0-9]+)/i);
+                        if (urlMatch) itemId = urlMatch[1];
+                    }
+
+                    // From backdrop/poster image URLs on the page (Items/12345/Images)
+                    if (!itemId) {
+                        const img = document.querySelector('img[src*="/Items/"]');
+                        if (img) {
+                            const imgMatch = img.src.match(/\\/Items\\/(\\d+)\\//);
+                            if (imgMatch) itemId = imgMatch[1];
+                        }
+                    }
+
+                    // From Emby's PlaybackManager state
+                    if (!itemId && window.PlaybackManager) {
+                        try {
+                            const nowPlaying = window.PlaybackManager.currentItem && window.PlaybackManager.currentItem();
+                            if (nowPlaying && nowPlaying.Id) itemId = nowPlaying.Id;
+                        } catch(e) {}
+                    }
+
+                    console.log('Embyfin Kiosk: Intercepting playback, itemId:', itemId, 'src:', src, 'hash:', window.location.hash);
+
+                    // Use postMessage to communicate across script boundaries
+                    window.postMessage({
+                        type: 'embyfin-kiosk-intercept',
+                        itemId: itemId,
+                        src: src
+                    }, '*');
+
+                    // Stop this video
+                    this.pause();
+                    this.src = '';
+
+                    // Reset after delay
+                    setTimeout(() => { intercepting = false; }, 3000);
+
+                    return Promise.reject(new Error('Intercepted by Embyfin Kiosk'));
+                }
+
+                return originalPlay.call(this);
+            };
+
+            console.log('Embyfin Kiosk: Installed video.play() interceptor');
+        })();
+        `;
+        document.documentElement.appendChild(script);
+        script.remove();
     }
 
     // Wait for page to be ready
