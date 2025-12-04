@@ -1,10 +1,13 @@
-// Embyfin Kiosk - Main script
-// Loaded dynamically by the userscript stub
+// JF External Player - Jellyfin external player integration
+// Intercepts video playback and redirects to external player (mpv)
 
 (function() {
     'use strict';
 
-    const KIOSK_SERVER = window.EMBYFIN_KIOSK_SERVER || 'http://localhost:9998';
+    console.log('JF External Player: Script loaded');
+
+    const KIOSK_SERVER = '{{KIOSK_SERVER}}';
+    const PREF_KEY_PREFIX = 'jf-external-player-';
 
     // Modal state
     let modalElement = null;
@@ -16,13 +19,13 @@
 
     // Create and show the modal overlay
     function showModal(message) {
-        if (modalElement) return; // Already showing
+        if (modalElement) return;
 
         modalElement = document.createElement('div');
-        modalElement.id = 'embyfin-kiosk-modal';
+        modalElement.id = 'jf-external-player-modal';
         modalElement.innerHTML = `
             <style>
-                #embyfin-kiosk-modal {
+                #jf-external-player-modal {
                     position: fixed;
                     top: 0;
                     left: 0;
@@ -34,7 +37,7 @@
                     align-items: center;
                     justify-content: center;
                 }
-                #embyfin-kiosk-modal .modal-box {
+                #jf-external-player-modal .modal-box {
                     background: #1a1a1a;
                     border: 1px solid #333;
                     border-radius: 8px;
@@ -44,32 +47,32 @@
                     font-family: system-ui, sans-serif;
                     max-width: 500px;
                 }
-                #embyfin-kiosk-modal .modal-title {
+                #jf-external-player-modal .modal-title {
                     font-size: 24px;
                     margin-bottom: 20px;
                 }
-                #embyfin-kiosk-modal .modal-status {
+                #jf-external-player-modal .modal-status {
                     font-size: 16px;
                     color: #aaa;
                     margin-bottom: 30px;
                 }
-                #embyfin-kiosk-modal .modal-hint {
+                #jf-external-player-modal .modal-hint {
                     font-size: 13px;
                     color: #666;
                 }
-                #embyfin-kiosk-modal .modal-error {
+                #jf-external-player-modal .modal-error {
                     color: #ff6b6b;
                 }
-                #embyfin-kiosk-modal .spinner {
+                #jf-external-player-modal .spinner {
                     width: 40px;
                     height: 40px;
                     border: 3px solid #333;
                     border-top-color: #00a4dc;
                     border-radius: 50%;
-                    animation: spin 1s linear infinite;
+                    animation: jf-spin 1s linear infinite;
                     margin: 0 auto 20px;
                 }
-                @keyframes spin {
+                @keyframes jf-spin {
                     to { transform: rotate(360deg); }
                 }
             </style>
@@ -77,20 +80,16 @@
                 <div class="spinner"></div>
                 <div class="modal-title">Playing in External Player</div>
                 <div class="modal-status">${message}</div>
-                <div class="modal-hint">Press <strong>Escape</strong> to stop playback and return to Emby</div>
+                <div class="modal-hint">Press <strong>Escape</strong> to stop playback and return to Jellyfin</div>
             </div>
         `;
         document.body.appendChild(modalElement);
         statusElement = modalElement.querySelector('.modal-status');
 
-        // Listen for escape key
         document.addEventListener('keydown', handleModalKeydown);
-
-        // Start polling for status
         startStatusPolling();
     }
 
-    // Update the modal status message
     function updateModalStatus(message, isError) {
         if (statusElement) {
             statusElement.textContent = message;
@@ -102,7 +101,6 @@
         }
     }
 
-    // Hide and cleanup the modal
     function hideModal() {
         if (pollInterval) {
             clearInterval(pollInterval);
@@ -116,7 +114,6 @@
         }
     }
 
-    // Handle escape key to stop playback
     function handleModalKeydown(event) {
         if (event.key === 'Escape') {
             event.preventDefault();
@@ -124,7 +121,6 @@
         }
     }
 
-    // Stop the external player
     function stopPlayback() {
         updateModalStatus('Stopping playback...');
         fetch(KIOSK_SERVER + '/api/stop', { method: 'POST' })
@@ -132,17 +128,14 @@
             .catch(() => hideModal());
     }
 
-    // Poll the server for playback status
     function startStatusPolling() {
         pollInterval = setInterval(() => {
             fetch(KIOSK_SERVER + '/api/status')
                 .then(response => response.json())
                 .then(status => {
                     if (!status.playing) {
-                        // Playback ended - server reports progress to Emby
                         hideModal();
                     } else {
-                        // Track position for progress reporting
                         if (status.position !== undefined) {
                             lastKnownPosition = status.position;
                         }
@@ -166,7 +159,6 @@
                     }
                 })
                 .catch(() => {
-                    // Server not responding, assume playback stopped
                     hideModal();
                 });
         }, 1000);
@@ -174,17 +166,14 @@
 
     // Send play request to local kiosk server
     function playInExternalPlayer(path, itemId, isResume) {
-        // Track item for progress reporting
         currentItemId = itemId;
         lastKnownPosition = 0;
         lastKnownDuration = 0;
 
-        // Show modal immediately
         showModal('Launching player...');
 
-        // Get Emby credentials for progress reporting
-        const apiBase = getApiBase();
-        const serverUrl = window.location.origin + apiBase;
+        // Get Jellyfin credentials for progress reporting
+        const serverUrl = window.location.origin;
         const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : '';
         const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : '';
 
@@ -198,60 +187,31 @@
         fetch(url)
             .then(response => {
                 if (response.ok) {
-                    console.log('Embyfin Kiosk: Playing in external player');
+                    console.log('JF External Player: Playing in external player');
                     updateModalStatus('Playing...');
                 } else {
-                    console.error('Embyfin Kiosk: Server error', response.status);
+                    console.error('JF External Player: Server error', response.status);
                     updateModalStatus('Server error: ' + response.status, true);
                     setTimeout(hideModal, 3000);
                 }
             })
             .catch(error => {
-                console.error('Embyfin Kiosk: Failed to connect', error);
-                updateModalStatus('Could not connect to server. Is embyfin-kiosk.exe running?', true);
+                console.error('JF External Player: Failed to connect', error);
+                updateModalStatus('Could not connect to server. Is jf-external-player running?', true);
                 setTimeout(hideModal, 3000);
             });
     }
 
-    // Check if this looks like an Emby/Jellyfin page
-    function isEmbyfinPage() {
+    // Check if this looks like a Jellyfin page
+    function isJellyfinPage() {
         return document.querySelector('.skinHeader') !== null ||
                document.querySelector('#indexPage') !== null ||
                window.location.pathname.includes('/web/') ||
                typeof window.ApiClient !== 'undefined';
     }
 
-    // Detect which platform we're on
-    function detectPlatform() {
-        if (window.ApiClient && window.ApiClient.serverInfo) {
-            const serverInfo = window.ApiClient.serverInfo();
-            if (serverInfo && serverInfo.ServerName) {
-                if (serverInfo.ServerName.toLowerCase().includes('jellyfin')) {
-                    return 'jellyfin';
-                }
-            }
-        }
-        if (document.querySelector('meta[name="application-name"][content*="Jellyfin"]')) {
-            return 'jellyfin';
-        }
-        if (document.querySelector('meta[name="application-name"][content*="Emby"]')) {
-            return 'emby';
-        }
-        if (window.location.hostname.includes('jellyfin')) {
-            return 'jellyfin';
-        }
-        return 'emby';
-    }
-
-    // Get the API base path
-    function getApiBase() {
-        const platform = detectPlatform();
-        return platform === 'jellyfin' ? '' : '/emby';
-    }
-
-    // Fetch item details from API
+    // Fetch item details from Jellyfin API
     async function getItemPath(itemId) {
-        const apiBase = getApiBase();
         const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : null;
         const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : null;
 
@@ -259,7 +219,7 @@
             throw new Error('Not authenticated');
         }
 
-        const url = `${window.location.origin}${apiBase}/Users/${userId}/Items/${itemId}?api_key=${encodeURIComponent(token)}`;
+        const url = `${window.location.origin}/Users/${userId}/Items/${itemId}?api_key=${encodeURIComponent(token)}`;
 
         const response = await fetch(url);
         if (!response.ok) {
@@ -272,78 +232,50 @@
 
     // Extract item ID from URL or element
     function extractItemId(element) {
-        // Direct data-id attribute
         if (element.dataset && element.dataset.id) {
             return element.dataset.id;
         }
 
-        // Look for parent with data-id
         let parent = element.closest('[data-id]');
         if (parent && parent.dataset.id) {
             return parent.dataset.id;
         }
 
-        // Look for the outer .card container (contains the image with item ID)
         const card = element.closest('.card');
         if (card) {
-            // Check various attributes Emby uses
             if (card.dataset.id) return card.dataset.id;
             if (card.dataset.itemid) return card.dataset.itemid;
             if (card.dataset.itemId) return card.dataset.itemId;
 
-            // Look for nested element with ID
             const inner = card.querySelector('[data-id], [data-itemid]');
             if (inner) {
                 return inner.dataset.id || inner.dataset.itemid;
             }
 
-            // Extract from image URL (e.g., /Items/62257/Images/Primary)
             const img = card.querySelector('img[src*="/Items/"]');
             if (img) {
                 const imgMatch = img.src.match(/\/Items\/(\d+)\//);
                 if (imgMatch) {
-                    console.log('Embyfin Kiosk: Extracted item ID from image URL:', imgMatch[1]);
                     return imgMatch[1];
                 }
             }
         }
 
-        // Check for itemAction button attributes
         const actionBtn = element.closest('[data-itemid], [data-id]');
         if (actionBtn) {
             return actionBtn.dataset.itemid || actionBtn.dataset.id;
         }
 
-        // From URL hash
         const urlMatch = window.location.hash.match(/id=([a-f0-9]+)/i);
         if (urlMatch) {
             return urlMatch[1];
         }
 
-        // From href
         if (element.href) {
             const hrefMatch = element.href.match(/id=([a-f0-9]+)/i);
             if (hrefMatch) {
                 return hrefMatch[1];
             }
-        }
-
-        // Log what we're looking at for debugging
-        console.log('Embyfin Kiosk: Could not extract ID from element:', element, 'classes:', element.className);
-
-        // Look for card and check for links or JS data inside
-        const debugCard = element.closest('.card');
-        if (debugCard) {
-            // Check for anchor with item link
-            const link = debugCard.querySelector('a[href*="id="]');
-            if (link) {
-                console.log('Embyfin Kiosk: Found link in card:', link.href);
-            }
-            // Check card's own properties
-            console.log('Embyfin Kiosk: Card dataset:', debugCard.dataset);
-            console.log('Embyfin Kiosk: Card item property:', debugCard.item);
-            // Log inner HTML structure
-            console.log('Embyfin Kiosk: Card innerHTML preview:', debugCard.innerHTML.substring(0, 500));
         }
 
         return null;
@@ -371,10 +303,9 @@
         }
 
         if (!itemId) {
-            return; // Already logged in extractItemId
+            return;
         }
 
-        // Prevent default immediately, before async operations
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
@@ -382,46 +313,35 @@
         try {
             const path = await getItemPath(itemId);
             if (path) {
-                console.log('Embyfin Kiosk: Playing', path, 'isResume:', isResume);
+                console.log('JF External Player: Playing', path, 'isResume:', isResume);
                 playInExternalPlayer(path, itemId, isResume);
             }
         } catch (err) {
-            console.error('Embyfin Kiosk: Error getting item path', err);
+            console.error('JF External Player: Error getting item path', err);
         }
     }
 
     // Add click listeners to play buttons
     function attachPlayListeners() {
-        // Only .btnPlay explicitly means "play from beginning"
-        const playFromBeginningSelectors = ['.btnPlay'];
         const playSelectors = [
             '.btnPlay',
+            '.btnReplay',
             '.btnResume',
             '.playButton',
             'button[data-action="play"]',
             '[data-action="resume"]',
             '.detailButton-primary',
             '.cardOverlayPlayButton',
-            '.itemAction[data-action="play"]',
-            '.actionSheetItemText' // Context menu items
+            '.itemAction[data-action="play"]'
         ];
 
         document.addEventListener('click', function(event) {
             const target = event.target.closest(playSelectors.join(','));
             if (target) {
-                // Check if this is a context menu "Play" item
-                const actionSheetItem = event.target.closest('.actionSheetItemText');
-                if (actionSheetItem) {
-                    const text = actionSheetItem.textContent.trim().toLowerCase();
-                    if (text !== 'play' && text !== 'resume') {
-                        return; // Not a play action, let it through
-                    }
-                }
-
-                // Default to resume (check for saved position)
-                // Only .btnPlay means "play from beginning"
-                const isPlayFromBeginning = event.target.closest(playFromBeginningSelectors.join(',')) !== null;
-                const isResume = !isPlayFromBeginning;
+                // Use data-action attribute to determine resume vs play-from-start
+                // data-action="resume" means resume, data-action="play" means from start
+                const action = target.getAttribute('data-action');
+                const isResume = action === 'resume';
                 handlePlayClick(event, isResume);
             }
         }, true);
@@ -436,33 +356,19 @@
                     try {
                         const path = await getItemPath(urlMatch[1]);
                         if (path) {
-                            console.log('Embyfin Kiosk: Playing via keyboard shortcut', path);
-                            playInExternalPlayer(path, urlMatch[1], true); // Resume by default
+                            console.log('JF External Player: Playing via keyboard shortcut', path);
+                            playInExternalPlayer(path, urlMatch[1], true);
                         }
                     } catch (err) {
-                        console.error('Embyfin Kiosk: Error', err);
+                        console.error('JF External Player: Error', err);
                     }
                 }
             }
         });
     }
 
-    // Check if we're on the kiosk server pages (for detection)
-    function isKioskPage() {
-        return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    }
-
-    // Signal presence to kiosk pages
-    function signalPresence() {
-        if (isKioskPage()) {
-            window.embyfinKioskInstalled = true;
-            document.dispatchEvent(new CustomEvent('embyfin-kiosk-installed'));
-        }
-    }
-
-    // Hook into Emby/Jellyfin's playback system
+    // Hook into Jellyfin's playback system
     function hookPlaybackManager() {
-        // Inject script directly into page to bypass sandbox restrictions
         const script = document.createElement('script');
         script.textContent = `
         (function() {
@@ -472,9 +378,8 @@
                 if (hooked) return;
                 const originalPlay = playbackManager.play.bind(playbackManager);
                 playbackManager.play = async function(options) {
-                    console.log('Embyfin Kiosk: Intercepted PlaybackManager.play', options);
+                    console.log('JF External Player: Intercepted PlaybackManager.play', options);
 
-                    // Extract item ID from options
                     let itemId = null;
                     if (options && options.ids && options.ids.length > 0) {
                         itemId = options.ids[0];
@@ -483,24 +388,21 @@
                     }
 
                     if (itemId) {
-                        // Default to resume (check for saved position)
-                        // The server will query Emby for the position if resume=true
                         let startPositionTicks = options && options.startPositionTicks ? options.startPositionTicks : 0;
-                        let isResume = true; // Default to resume
-                        console.log('Embyfin Kiosk: startPositionTicks =', startPositionTicks, 'isResume =', isResume);
+                        let isResume = true;
+                        console.log('JF External Player: startPositionTicks =', startPositionTicks, 'isResume =', isResume);
 
-                        // Dispatch event for userscript to handle
-                        const event = new CustomEvent('embyfin-kiosk-play', {
+                        const event = new CustomEvent('jf-external-player-play', {
                             detail: { itemId: itemId, startPositionTicks: startPositionTicks, isResume: isResume }
                         });
                         document.dispatchEvent(event);
-                        return; // Don't call original play
+                        return;
                     }
 
                     return originalPlay(options);
                 };
                 hooked = true;
-                console.log('Embyfin Kiosk: Hooked PlaybackManager.play');
+                console.log('JF External Player: Hooked PlaybackManager.play');
             }
 
             function tryHook() {
@@ -511,36 +413,30 @@
                 return false;
             }
 
-            // Check current state
-            console.log('Embyfin Kiosk: PlaybackManager exists?', typeof window.PlaybackManager, window.PlaybackManager);
-
-            // Try to hook immediately if it exists
             if (tryHook()) {
-                console.log('Embyfin Kiosk: Hooked immediately');
+                console.log('JF External Player: Hooked immediately');
             } else {
-                // Use property trap if PlaybackManager not yet defined
                 if (typeof window.PlaybackManager === 'undefined' || window.PlaybackManager === null) {
                     let _pm = undefined;
                     Object.defineProperty(window, 'PlaybackManager', {
                         get: function() { return _pm; },
                         set: function(val) {
-                            console.log('Embyfin Kiosk: PlaybackManager being set to', val);
+                            console.log('JF External Player: PlaybackManager being set to', val);
                             _pm = val;
                             if (val && val.play) doHook(val);
                         },
                         configurable: true
                     });
-                    console.log('Embyfin Kiosk: Installed PlaybackManager trap');
+                    console.log('JF External Player: Installed PlaybackManager trap');
                 }
 
-                // Polling backup
                 let attempts = 0;
                 const interval = setInterval(() => {
                     if (tryHook()) {
-                        console.log('Embyfin Kiosk: Hooked via polling after', attempts, 'attempts');
+                        console.log('JF External Player: Hooked via polling after', attempts, 'attempts');
                         clearInterval(interval);
                     } else if (++attempts > 60) {
-                        console.log('Embyfin Kiosk: Gave up polling for PlaybackManager');
+                        console.log('JF External Player: Gave up polling for PlaybackManager');
                         clearInterval(interval);
                     }
                 }, 500);
@@ -550,74 +446,55 @@
         document.documentElement.appendChild(script);
         script.remove();
 
-        // Listen for play events from injected script
-        document.addEventListener('embyfin-kiosk-play', async function(e) {
+        document.addEventListener('jf-external-player-play', async function(e) {
             const itemId = e.detail.itemId;
             const startPositionTicks = e.detail.startPositionTicks || 0;
-            // Default to resume unless we know it's play from beginning
             const isResume = e.detail.isResume !== false;
-            console.log('Embyfin Kiosk: Received play event for', itemId, 'startPositionTicks:', startPositionTicks, 'isResume:', isResume);
+            console.log('JF External Player: Received play event for', itemId, 'startPositionTicks:', startPositionTicks, 'isResume:', isResume);
             try {
                 const path = await getItemPath(itemId);
                 if (path) {
-                    console.log('Embyfin Kiosk: Playing externally', path);
+                    console.log('JF External Player: Playing externally', path);
                     playInExternalPlayer(path, itemId, isResume);
                 }
             } catch (err) {
-                console.error('Embyfin Kiosk: Error getting path', err);
+                console.error('JF External Player: Error getting path', err);
             }
         });
     }
 
-    // Initialize
-    function init() {
-        signalPresence();
-        if (!isEmbyfinPage()) {
-            return;
-        }
-        console.log('Embyfin Kiosk: Initializing, platform:', detectPlatform());
-        hookPlaybackManager();
-        attachPlayListeners();
-        attachKeyboardShortcut();
-        interceptVideoPlayback();
-    }
-
     // Intercept all video playback by overriding HTMLVideoElement.play
     function interceptVideoPlayback() {
-        // Listen for intercept messages (using postMessage to cross script boundaries)
         window.addEventListener('message', async function(e) {
-            if (e.data && e.data.type === 'embyfin-kiosk-intercept') {
+            if (e.data && e.data.type === 'jf-external-player-intercept') {
                 const itemId = e.data.itemId;
                 const src = e.data.src;
-                console.log('Embyfin Kiosk: Handling intercept, itemId:', itemId, 'src:', src);
+                console.log('JF External Player: Handling intercept, itemId:', itemId, 'src:', src);
 
-                // Hide any video player UI
                 document.querySelectorAll('.videoPlayerContainer, .videoOsdBottom, .videoOsd').forEach(el => {
                     el.style.display = 'none';
                 });
 
-                // Go back
                 history.back();
 
                 if (itemId) {
                     try {
                         const path = await getItemPath(itemId);
-                        console.log('Embyfin Kiosk: Got path:', path);
+                        console.log('JF External Player: Got path:', path);
                         if (path) {
                             playInExternalPlayer(path, itemId, true);
                         } else {
-                            console.error('Embyfin Kiosk: No path returned for item', itemId);
+                            console.error('JF External Player: No path returned for item', itemId);
                         }
                     } catch (err) {
-                        console.error('Embyfin Kiosk: Error getting path:', err);
+                        console.error('JF External Player: Error getting path:', err);
                     }
                 } else {
-                    console.error('Embyfin Kiosk: No itemId found to play');
+                    console.error('JF External Player: No itemId found to play');
                 }
             }
         });
 
-        // Inject into page context to override prototype
         const script = document.createElement('script');
         script.textContent = `
         (function() {
@@ -626,30 +503,29 @@
 
             HTMLVideoElement.prototype.play = function() {
                 const src = this.src || '';
-                console.log('Embyfin Kiosk: Video.play() intercepted, src:', src);
+                console.log('JF External Player: Video.play() intercepted, src:', src);
 
                 if (intercepting) {
-                    return Promise.reject(new Error('Intercepted by Embyfin Kiosk'));
+                    return Promise.reject(new Error('Intercepted by JF External Player'));
                 }
 
-                // Check if this looks like Emby video playback
-                if (src.includes('blob:') || src.includes('/emby/') || src.includes('/Videos/')) {
+                // Check if this looks like Jellyfin video playback
+                if (src.includes('blob:') || src.includes('/Videos/')) {
                     intercepting = true;
 
-                    // Try to get item ID from multiple sources
                     let itemId = null;
 
-                    // From video src (e.g., /emby/Videos/12345/stream or /Videos/12345/...)
+                    // From video src (e.g., /Videos/12345/stream)
                     const srcMatch = src.match(/\\/Videos\\/([0-9]+)[\\/\\?]/i);
                     if (srcMatch) itemId = srcMatch[1];
 
-                    // From URL hash (id=12345 or itemId=12345)
+                    // From URL hash
                     if (!itemId) {
                         const urlMatch = window.location.hash.match(/(?:id|itemId)=([0-9]+)/i);
                         if (urlMatch) itemId = urlMatch[1];
                     }
 
-                    // From backdrop/poster image URLs on the page (Items/12345/Images)
+                    // From image URLs on the page
                     if (!itemId) {
                         const img = document.querySelector('img[src*="/Items/"]');
                         if (img) {
@@ -658,7 +534,7 @@
                         }
                     }
 
-                    // From Emby's PlaybackManager state
+                    // From PlaybackManager state
                     if (!itemId && window.PlaybackManager) {
                         try {
                             const nowPlaying = window.PlaybackManager.currentItem && window.PlaybackManager.currentItem();
@@ -666,40 +542,70 @@
                         } catch(e) {}
                     }
 
-                    console.log('Embyfin Kiosk: Intercepting playback, itemId:', itemId, 'src:', src, 'hash:', window.location.hash);
+                    console.log('JF External Player: Intercepting playback, itemId:', itemId, 'src:', src, 'hash:', window.location.hash);
 
-                    // Use postMessage to communicate across script boundaries
                     window.postMessage({
-                        type: 'embyfin-kiosk-intercept',
+                        type: 'jf-external-player-intercept',
                         itemId: itemId,
                         src: src
                     }, '*');
 
-                    // Stop this video
                     this.pause();
                     this.src = '';
 
-                    // Reset after delay
                     setTimeout(() => { intercepting = false; }, 3000);
 
-                    return Promise.reject(new Error('Intercepted by Embyfin Kiosk'));
+                    return Promise.reject(new Error('Intercepted by JF External Player'));
                 }
 
                 return originalPlay.call(this);
             };
 
-            console.log('Embyfin Kiosk: Installed video.play() interceptor');
+            console.log('JF External Player: Installed video.play() interceptor');
         })();
         `;
         document.documentElement.appendChild(script);
         script.remove();
     }
 
+    // Check if external player is enabled for this user
+    function isEnabled() {
+        const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : 'default';
+        const prefKey = PREF_KEY_PREFIX + userId;
+        return localStorage.getItem(prefKey) !== 'false'; // default true
+    }
+
+    // Initialize
+    async function init() {
+        // Check user preference
+        if (!isEnabled()) {
+            console.log('JF External Player: Disabled by user preference');
+            return;
+        }
+
+        // Check if kiosk server is running
+        try {
+            await fetch(KIOSK_SERVER + '/api/status');
+        } catch {
+            console.log('JF External Player: Server not available at', KIOSK_SERVER);
+            return;
+        }
+
+        if (!isJellyfinPage()) {
+            return;
+        }
+
+        console.log('JF External Player: Initializing');
+        hookPlaybackManager();
+        attachPlayListeners();
+        attachKeyboardShortcut();
+        interceptVideoPlayback();
+    }
+
     // Wait for page to be ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
-        // Delay slightly to ensure Emby/Jellyfin JS has loaded
         setTimeout(init, 1000);
     }
 })();

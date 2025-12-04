@@ -1,6 +1,8 @@
 # Binaries
 embyfin-kiosk
 embyfin-kiosk.exe
+jf-external-player
+jf-external-player.exe
 *.exe
 *.dll
 *.so

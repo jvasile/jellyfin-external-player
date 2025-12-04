@@ -1,15 +1,12 @@
 package main
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
-	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -19,15 +16,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/Microsoft/go-winio"
 )
 
-//go:embed extension/*
-var extensionFS embed.FS
+// jf-external-player.js is read from disk to allow editing without restart
 
 type PathMapping struct {
 	Type    string `json:"type"`    // "prefix", "wildcard", or "regex"
@@ -71,13 +66,7 @@ var (
 	embyToken     string
 )
 
-// Connect to mpv IPC - uses named pipes on Windows, Unix sockets on Linux
-func connectMpvIPC(pipePath string) (net.Conn, error) {
-	if runtime.GOOS == "windows" {
-		return winio.DialPipe(pipePath, nil)
-	}
-	return net.DialTimeout("unix", pipePath, 500*time.Millisecond)
-}
+// connectMpvIPC is defined in ipc_windows.go or ipc_unix.go
 
 // Query mpv for a property via IPC
 func queryMpvProperty(pipePath, property string) (interface{}, error) {
@@ -179,7 +168,7 @@ func reportPlaybackStart() {
 		"ItemId":      itemId,
 		"CanSeek":     true,
 		"PlayMethod":  "DirectPlay",
-		"PlaySessionId": fmt.Sprintf("embyfin-kiosk-%d", time.Now().Unix()),
+		"PlaySessionId": fmt.Sprintf("jf-external-player-%d", time.Now().Unix()),
 	}
 	bodyBytes, _ := json.Marshal(body)
 
@@ -227,7 +216,7 @@ func reportPlaybackStopped() {
 	body := map[string]interface{}{
 		"ItemId":        itemId,
 		"PositionTicks": positionTicks,
-		"PlaySessionId": fmt.Sprintf("embyfin-kiosk-%d", time.Now().Unix()),
+		"PlaySessionId": fmt.Sprintf("jf-external-player-%d", time.Now().Unix()),
 	}
 	bodyBytes, _ := json.Marshal(body)
 
@@ -515,11 +504,7 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	// Add IPC socket for mpv to get playback position
 	var ipcPath string
 	if playerKey == "mpv" {
-		if runtime.GOOS == "windows" {
-			ipcPath = `\\.\pipe\embyfin-kiosk-mpv`
-		} else {
-			ipcPath = "/tmp/embyfin-kiosk-mpv.sock"
-		}
+		ipcPath = getMpvIPCPath()
 		args = append(args, "--input-ipc-server="+ipcPath)
 
 		// Add resume position if provided
@@ -713,7 +698,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Embyfin Kiosk Config</title>
+    <title>JF External Player Config</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; }
         h1 { margin-bottom: 30px; }
@@ -787,7 +772,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
     </style>
 </head>
 <body>
-    <h1>Embyfin Kiosk Configuration</h1>
+    <h1>JF External Player Configuration</h1>
 
     <form method="POST" id="configForm">
         <div class="section">
@@ -817,7 +802,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
             <button type="button" class="add-btn" onclick="addMapping()">+ Add Mapping</button>
 
             <div class="tip">
-                <strong>Tip:</strong> To find the path Emby uses, go to any video, click the three dots menu, then "Edit metadata". The file path is shown there.
+                <strong>Tip:</strong> To find the path Jellyfin uses, go to any video, click the three dots menu, then "Edit metadata". The file path is shown there.
                 <a href="/help/mappings">See mapping examples &rarr;</a>
             </div>
         </div>
@@ -869,11 +854,11 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 
         // Check for extension/userscript
         (function checkInstalled() {
-            document.addEventListener('embyfin-kiosk-installed', function() {
+            document.addEventListener('jf-external-player-installed', function() {
                 document.getElementById('installWarning').style.display = 'none';
             });
             setTimeout(() => {
-                if (!window.embyfinKioskInstalled) {
+                if (!window.jfExternalPlayerInstalled) {
                     document.getElementById('installWarning').style.display = 'block';
                 }
             }, 1000);
@@ -975,7 +960,7 @@ func helpMappingsHandler(w http.ResponseWriter, r *http.Request) {
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Path Mapping Help - Embyfin Kiosk</title>
+    <title>Path Mapping Help - JF External Player</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; line-height: 1.6; }
         h1 { margin-bottom: 10px; }
@@ -996,7 +981,7 @@ func helpMappingsHandler(w http.ResponseWriter, r *http.Request) {
     <h1>Path Mapping Help</h1>
     <p><a href="/config">&larr; Back to Configuration</a></p>
 
-    <p>Path mappings transform media file paths from your Emby/Jellyfin server to Windows-accessible paths.</p>
+    <p>Path mappings transform media file paths from your Jellyfin server to Windows-accessible paths.</p>
 
     <h2>Mapping Types</h2>
 
@@ -1084,125 +1069,92 @@ func helpMappingsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
-func extensionDownloadHandler(w http.ResponseWriter, r *http.Request) {
-	// Create a zip file in memory
-	buf := new(bytes.Buffer)
-	zipWriter := zip.NewWriter(buf)
-
-	// Walk the embedded extension directory
-	err := fs.WalkDir(extensionFS, "extension", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		// Read the file
-		data, err := extensionFS.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		// Create file in zip (strip "extension/" prefix)
-		zipPath := strings.TrimPrefix(path, "extension/")
-		f, err := zipWriter.Create(zipPath)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(data)
-		return err
-	})
-
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create zip: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	zipWriter.Close()
-
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", "attachment; filename=embyfin-kiosk-extension.zip")
-	w.Write(buf.Bytes())
-}
-
+// Serve userscript stub that loads main JS from server
 func userscriptHandler(w http.ResponseWriter, r *http.Request) {
-	// Try to read template from disk first (allows editing without restart during development)
-	// Fall back to embedded version if not found
-	templateBytes, err := os.ReadFile("extension/userscript.template.js")
-	if err != nil {
-		// Try relative to executable
-		if exePath, err2 := os.Executable(); err2 == nil {
-			exeDir := filepath.Dir(exePath)
-			templateBytes, err = os.ReadFile(filepath.Join(exeDir, "extension", "userscript.template.js"))
-		}
-	}
-	if err != nil {
-		// Fall back to embedded version
-		templateBytes, err = extensionFS.ReadFile("extension/userscript.template.js")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to read userscript.template.js: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	// Build @include directives from config
 	configMu.RLock()
 	serverURLs := config.ServerURLs
 	port := config.Port
 	configMu.RUnlock()
 
+	// Build @include directives
 	var includeLines strings.Builder
-	// Always include the kiosk server pages for detection
-	includeLines.WriteString(fmt.Sprintf("@include      http://localhost:%d/*\n// ", port))
-	includeLines.WriteString(fmt.Sprintf("@include      http://127.0.0.1:%d/*\n// ", port))
+	includeLines.WriteString(fmt.Sprintf("// @include      http://localhost:%d/*\n", port))
+	includeLines.WriteString(fmt.Sprintf("// @include      http://127.0.0.1:%d/*\n", port))
 	if len(serverURLs) == 0 {
-		// Fallback if no servers configured
-		includeLines.WriteString("@include      *://*/*")
+		includeLines.WriteString("// @include      *://*/*\n")
 	} else {
-		for i, url := range serverURLs {
-			includeLines.WriteString(fmt.Sprintf("@include      %s", url))
-			if i < len(serverURLs)-1 {
-				includeLines.WriteString("\n// ")
-			}
+		for _, serverURL := range serverURLs {
+			includeLines.WriteString(fmt.Sprintf("// @include      %s\n", serverURL))
 		}
 	}
 
-	// Replace placeholders in template
-	script := string(templateBytes)
-	script = strings.Replace(script, "{{INCLUDE_LINES}}", includeLines.String(), 1)
-	script = strings.Replace(script, "{{PORT}}", fmt.Sprintf("%d", port), 1)
+	kioskServerURL := fmt.Sprintf("http://localhost:%d", port)
+
+	script := fmt.Sprintf(`// ==UserScript==
+// @name         JF External Player
+// @namespace    jf-external-player
+// @version      1.0
+// @description  Launch external player (mpv) for Jellyfin videos
+// @author       You
+%s// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Mark as installed
+    window.jfExternalPlayerInstalled = true;
+
+    // Load main script from server when head is available
+    function loadScript() {
+        const script = document.createElement('script');
+        script.src = '%s/jf-external-player.js';
+        (document.head || document.documentElement).appendChild(script);
+    }
+
+    if (document.head) {
+        loadScript();
+    } else {
+        document.addEventListener('DOMContentLoaded', loadScript);
+    }
+})();
+`, includeLines.String(), kioskServerURL)
 
 	w.Header().Set("Content-Type", "application/javascript")
 	w.Write([]byte(script))
 }
 
-// Serve the main JavaScript file (loaded by the userscript stub)
+// Serve the main JavaScript file with URL templating
 func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/javascript")
 	// Cache for 1 hour - shift-reload will bypass cache
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 
-	// Try to read from disk first (allows editing without restart during development)
-	scriptBytes, err := os.ReadFile("extension/embyfin-kiosk.js")
+	// Try to read from disk (allows editing without restart during development)
+	scriptBytes, err := os.ReadFile("jf-external-player.js")
 	if err != nil {
 		// Try relative to executable
 		if exePath, err2 := os.Executable(); err2 == nil {
 			exeDir := filepath.Dir(exePath)
-			scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "extension", "embyfin-kiosk.js"))
+			scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "jf-external-player.js"))
 		}
 	}
 	if err != nil {
-		// Fall back to embedded version
-		scriptBytes, err = extensionFS.ReadFile("extension/embyfin-kiosk.js")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to read embyfin-kiosk.js: %v", err), http.StatusInternalServerError)
-			return
-		}
+		http.Error(w, fmt.Sprintf("Failed to read jf-external-player.js: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	w.Write(scriptBytes)
+	// Inject the server URL
+	configMu.RLock()
+	port := config.Port
+	configMu.RUnlock()
+
+	kioskServerURL := fmt.Sprintf("http://localhost:%d", port)
+	script := strings.Replace(string(scriptBytes), "{{KIOSK_SERVER}}", kioskServerURL, -1)
+
+	w.Write([]byte(script))
 }
 
 func installPageHandler(w http.ResponseWriter, r *http.Request) {
@@ -1210,7 +1162,6 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		r.ParseForm()
 		urls := r.Form["server_url"]
-		// Filter empty URLs
 		var filtered []string
 		for _, u := range urls {
 			u = strings.TrimSpace(u)
@@ -1223,101 +1174,7 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 		config.ServerURLsSet = true
 		saveConfigLocked()
 		configMu.Unlock()
-		http.Redirect(w, r, "/install/userscript?saved=1", http.StatusSeeOther)
-		return
-	}
-
-	// Redirect base /install to /install/extension
-	http.Redirect(w, r, "/install/extension", http.StatusSeeOther)
-}
-
-func installExtensionHandler(w http.ResponseWriter, r *http.Request) {
-	html := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Install Extension - Embyfin Kiosk</title>
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; line-height: 1.6; }
-        h1 { margin-bottom: 30px; }
-        h3 { margin-top: 20px; color: #555; }
-        code { background: #f1f5f9; padding: 2px 8px; border-radius: 4px; font-size: 14px; }
-        a { color: #3b82f6; }
-        .browser-section { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .note { background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; }
-        .tabs { margin-bottom: 20px; }
-        .tabs a { display: inline-block; padding: 10px 20px; margin-right: 10px; border: 2px solid #3b82f6; border-radius: 8px; text-decoration: none; }
-        .tabs a.active { background: #3b82f6; color: white; }
-        ol { padding-left: 20px; }
-        li { margin-bottom: 10px; }
-    </style>
-</head>
-<body>
-    <h1>Install Embyfin Kiosk</h1>
-
-    <div class="tabs">
-        <a href="/install/extension" class="active">Browser Extension</a>
-        <a href="/install/userscript">Userscript</a>
-    </div>
-
-    <p>Direct link: <code><a href="/extension.zip">http://localhost:9999/extension.zip</a></code></p>
-
-    <div class="browser-section">
-        <h3>Chrome / Edge / Brave</h3>
-        <ol>
-            <li>Download and extract the zip file</li>
-            <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>)</li>
-            <li>Enable "Developer mode" (toggle in top right)</li>
-            <li>Click "Load unpacked"</li>
-            <li>Select the extracted folder</li>
-        </ol>
-    </div>
-
-    <div class="browser-section">
-        <h3>Firefox</h3>
-        <ol>
-            <li>Download and extract the zip file</li>
-            <li>Open <code>about:debugging#/runtime/this-firefox</code></li>
-            <li>Click "Load Temporary Add-on"</li>
-            <li>Select any file in the extracted folder (e.g., manifest.json)</li>
-        </ol>
-        <div class="note">
-            <strong>Note:</strong> Temporary add-ons are removed when Firefox closes.
-        </div>
-    </div>
-
-    <h2>After Installation</h2>
-    <ol>
-        <li>Click the extension icon in your browser toolbar</li>
-        <li>Verify the server URL is <code>http://localhost:9999</code></li>
-        <li>Navigate to your Emby or Jellyfin server</li>
-        <li>Click play on any movie or episode, or press <strong>K</strong></li>
-    </ol>
-
-    <p style="margin-top: 40px;"><a href="/config">Configuration</a></p>
-</body>
-</html>`
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
-}
-
-func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
-	// Handle POST to save server URLs
-	if r.Method == "POST" {
-		r.ParseForm()
-		urls := r.Form["server_url"]
-		var filtered []string
-		for _, u := range urls {
-			u = strings.TrimSpace(u)
-			if u != "" {
-				filtered = append(filtered, u)
-			}
-		}
-		configMu.Lock()
-		config.ServerURLs = filtered
-		config.ServerURLsSet = true
-		saveConfigLocked()
-		configMu.Unlock()
-		http.Redirect(w, r, "/install/userscript?saved=1", http.StatusSeeOther)
+		http.Redirect(w, r, "/install?saved=1", http.StatusSeeOther)
 		return
 	}
 
@@ -1332,7 +1189,7 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
 		urlInputs.WriteString(`<input type="text" name="server_url" placeholder="http://myserver:8096/*" class="url-input">`)
 	} else {
 		for _, u := range serverURLs {
-			urlInputs.WriteString(fmt.Sprintf(`<input type="text" name="server_url" value="%s" class="url-input">`, u))
+			urlInputs.WriteString(fmt.Sprintf(`<input type="text" name="server_url" value="%s" class="url-input">`, escapeHTML(u)))
 		}
 	}
 
@@ -1344,7 +1201,7 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
 	html := `<!DOCTYPE html>
 <html>
 <head>
-    <title>Install Userscript - Embyfin Kiosk</title>
+    <title>Install - JF External Player</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; line-height: 1.6; }
         h1 { margin-bottom: 30px; }
@@ -1352,9 +1209,6 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
         code { background: #f1f5f9; padding: 2px 8px; border-radius: 4px; font-size: 14px; }
         a { color: #3b82f6; }
         .browser-section { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .tabs { margin-bottom: 20px; }
-        .tabs a { display: inline-block; padding: 10px 20px; margin-right: 10px; border: 2px solid #3b82f6; border-radius: 8px; text-decoration: none; }
-        .tabs a.active { background: #3b82f6; color: white; }
         ol, ul { padding-left: 20px; }
         li { margin-bottom: 10px; }
         .url-input { width: 100%; padding: 8px; margin: 5px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
@@ -1374,12 +1228,7 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
     </style>
 </head>
 <body>
-    <h1>Install Embyfin Kiosk</h1>
-
-    <div class="tabs">
-        <a href="/install/extension">Browser Extension</a>
-        <a href="/install/userscript" class="active">Userscript</a>
-    </div>
+    <h1>Install JF External Player</h1>
 
     <div class="browser-section">
         <h3>Step 1: Install a Userscript Manager</h3>
@@ -1393,7 +1242,7 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
 
     <div class="browser-section">
         <h3>Step 2: Configure Server URLs</h3>
-        <p>Enter the URLs of your Emby/Jellyfin servers, or discover them automatically.</p>
+        <p>Enter the URLs of your Jellyfin servers, or discover them automatically.</p>
         <button type="button" class="discover-btn" onclick="discoverServers()">Discover Servers</button>
         <button type="button" class="reset-btn" onclick="resetToDiscovery()">Reset to Auto-Discovery</button>
         <span id="discoverStatus"></span>
@@ -1410,15 +1259,15 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
 
     <div class="browser-section">
         <h3>Step 3: Install the Userscript</h3>
-        <a href="/embyfin-kiosk.user.js" class="install-btn">Install Userscript</a>
+        <a href="/jf-external-player.user.js" class="install-btn">Install Userscript</a>
         <p style="margin-top: 10px; font-size: 13px; color: #666;">If you change the server URLs, reinstall the userscript to pick up the changes.</p>
         <div id="installStatus" style="margin-top: 15px;"></div>
     </div>
 
     <h2>After Installation</h2>
     <ol>
-        <li>Navigate to your Emby or Jellyfin server</li>
-        <li>Click play on any movie or episode, or press <strong>K</strong></li>
+        <li>Navigate to your Jellyfin server</li>
+        <li>Click play on any movie or episode</li>
     </ol>
 
     <p style="margin-top: 40px;"><a href="/config">Configuration</a></p>
@@ -1453,7 +1302,6 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
                         if (input.value) existing.add(input.value);
                     });
 
-                    // Remove empty placeholder if present
                     const inputs = urlList.querySelectorAll('input');
                     if (inputs.length === 1 && !inputs[0].value) {
                         inputs[0].remove();
@@ -1488,31 +1336,6 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
             setTimeout(() => { status.textContent = ''; }, 5000);
         }
 
-        // Check if startup auto-discovery is still running
-        (async function checkStartupDiscovery() {
-            const response = await fetch('/api/discover?status=1');
-            const data = await response.json();
-
-            if (data.status === 'scanning') {
-                const status = document.getElementById('discoverStatus');
-                status.textContent = 'Auto-discovery in progress...';
-                status.style.color = '#666';
-                setTimeout(async () => {
-                    const r = await fetch('/api/discover?status=1');
-                    const d = await r.json();
-                    if (d.status === 'complete') {
-                        status.textContent = '';
-                        // Reload page to show discovered servers
-                        if (d.servers && d.servers.length > 0) {
-                            window.location.reload();
-                        }
-                    } else {
-                        checkStartupDiscovery();
-                    }
-                }, 500);
-            }
-        })();
-
         async function resetToDiscovery() {
             if (!confirm('This will clear your saved server URLs and re-scan the network. Continue?')) {
                 return;
@@ -1522,28 +1345,22 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
             status.textContent = 'Resetting...';
             status.style.color = '#666';
 
-            // Clear the URL list
             const urlList = document.getElementById('urlList');
             urlList.innerHTML = '<input type="text" name="server_url" placeholder="http://myserver:8096/*" class="url-input">';
 
-            // Call reset API
             await fetch('/api/discover/reset');
-
-            // Now run discovery
             discoverServers();
         }
 
         // Check if userscript is installed
         (function checkInstalled() {
             const statusDiv = document.getElementById('installStatus');
-            // Listen for event from userscript
-            document.addEventListener('embyfin-kiosk-installed', function() {
-                statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">✓ Userscript is installed and active</span>';
+            document.addEventListener('jf-external-player-installed', function() {
+                statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">Userscript is installed and active</span>';
             });
-            // Also check window flag after a short delay
             setTimeout(() => {
-                if (window.embyfinKioskInstalled) {
-                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">✓ Userscript is installed and active</span>';
+                if (window.jfExternalPlayerInstalled) {
+                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">Userscript is installed and active</span>';
                 }
             }, 500);
         })();
@@ -1562,7 +1379,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	html := `<!DOCTYPE html>
 <html>
 <head>
-    <title>Embyfin Kiosk</title>
+    <title>JF External Player</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 600px; margin: 80px auto; padding: 20px; text-align: center; }
         h1 { margin-bottom: 10px; }
@@ -1582,10 +1399,10 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
     </style>
 </head>
 <body>
-    <h1>Embyfin Kiosk</h1>
-    <p class="subtitle">External player launcher for Emby/Jellyfin</p>
+    <h1>JF External Player</h1>
+    <p class="subtitle">External player launcher for Jellyfin</p>
     <div class="links">
-        <a href="/install">Install Browser Extension</a>
+        <a href="/install">Install Userscript</a>
         <a href="/config">Configuration</a>
     </div>
     <div class="status">Server running</div>
@@ -1901,7 +1718,7 @@ func getDefaultLogPath() string {
 	} else {
 		tempDir = "/tmp"
 	}
-	return filepath.Join(tempDir, "embyfin-kiosk.log")
+	return filepath.Join(tempDir, "jf-external-player.log")
 }
 
 
@@ -1934,9 +1751,13 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Override port if specified on command line
+	// Port priority: CLI flag > env var > config file > default (9998)
 	if portFlag > 0 {
 		config.Port = portFlag
+	} else if envPort := os.Getenv("JF_EXTERNAL_PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
+			config.Port = p
+		}
 	}
 
 	// Auto-discover servers on startup if not configured by user
@@ -1955,11 +1776,8 @@ func main() {
 	http.HandleFunc("/config", configPageHandler)
 	http.HandleFunc("/help/mappings", helpMappingsHandler)
 	http.HandleFunc("/install", installPageHandler)
-	http.HandleFunc("/install/extension", installExtensionHandler)
-	http.HandleFunc("/install/userscript", installUserscriptHandler)
-	http.HandleFunc("/extension.zip", extensionDownloadHandler)
-	http.HandleFunc("/embyfin-kiosk.user.js", userscriptHandler)
-	http.HandleFunc("/embyfin-kiosk.js", mainScriptHandler)
+	http.HandleFunc("/jf-external-player.user.js", userscriptHandler)
+	http.HandleFunc("/jf-external-player.js", mainScriptHandler)
 	http.HandleFunc("/api/restart", restartHandler)
 	http.HandleFunc("/api/shutdown", shutdownHandler)
 

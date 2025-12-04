@@ -1,4 +1,4 @@
-module embyfin-kiosk
+module jf-external-player
 
 go 1.24.9
 
