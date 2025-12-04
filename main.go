@@ -370,6 +370,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
         #mappingsContainer { margin-top: 15px; }
         .example { background: #f0f9ff; padding: 12px; border-radius: 4px; margin-top: 15px; font-size: 13px; }
         .example code { background: #e0f2fe; padding: 2px 6px; border-radius: 3px; }
+        .tip { background: #f0fdf4; padding: 12px; border-radius: 4px; margin-top: 10px; font-size: 13px; color: #166534; }
         .warning { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 15px; border-radius: 8px; margin-top: 30px; }
         .warning a { color: #92400e; font-weight: 500; }
     </style>
@@ -399,6 +400,9 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
             <div class="example">
                 <strong>Example:</strong> To map <code>nfs://192.168.1.28/mnt/media/Movies</code> to <code>\\server\Movies</code><br>
                 Type: <code>prefix</code>, Match: <code>nfs://192.168.1.28/mnt/media/Movies</code>, Replace: <code>\\server\Movies</code>
+            </div>
+            <div class="tip">
+                <strong>Tip:</strong> To find the path Emby uses, go to any video, click the three dots menu, then "Edit metadata". The file path is shown there.
             </div>
         </div>
 
