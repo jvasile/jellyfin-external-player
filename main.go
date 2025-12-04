@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed extension/*
@@ -682,6 +684,18 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
         }
         .save-btn:hover { background: #2563eb; }
         .success { color: green; margin-left: 10px; }
+        .discover-btn {
+            background: #8b5cf6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 15px;
+        }
+        .discover-btn:hover { background: #7c3aed; }
+        .discover-btn:disabled { background: #c4b5fd; cursor: wait; }
+        #discoverStatus { margin-left: 10px; color: #666; }
     </style>
 </head>
 <body>
@@ -745,7 +759,9 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 
         <div class="browser-section">
             <h3>Step 2: Configure Server URLs</h3>
-            <p>Enter the URLs of your Emby/Jellyfin servers. Use <code>*</code> as a wildcard.</p>
+            <p>Enter the URLs of your Emby/Jellyfin servers, or discover them automatically.</p>
+            <button type="button" class="discover-btn" onclick="discoverServers()">Discover Servers</button>
+            <span id="discoverStatus"></span>
             <form method="POST" id="urlForm">
                 <div class="url-list" id="urlList">
                     ` + urlInputs.String() + `
@@ -808,6 +824,54 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
                 history.replaceState(null, '', '/install');
             }, 3000);
         }
+
+        async function discoverServers() {
+            const btn = document.querySelector('.discover-btn');
+            const status = document.getElementById('discoverStatus');
+
+            btn.disabled = true;
+            status.textContent = 'Scanning network...';
+
+            try {
+                const response = await fetch('/api/discover');
+                const servers = await response.json();
+
+                if (servers && servers.length > 0) {
+                    const urlList = document.getElementById('urlList');
+                    // Get existing URLs to avoid duplicates
+                    const existing = new Set();
+                    urlList.querySelectorAll('input').forEach(input => {
+                        if (input.value) existing.add(input.value);
+                    });
+
+                    let added = 0;
+                    servers.forEach(server => {
+                        if (!existing.has(server.url)) {
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.name = 'server_url';
+                            input.value = server.url;
+                            input.className = 'url-input';
+                            input.title = server.name + ' (' + server.platform + ')';
+                            urlList.appendChild(input);
+                            added++;
+                        }
+                    });
+
+                    status.textContent = 'Found ' + servers.length + ' server(s)' + (added < servers.length ? ', ' + (servers.length - added) + ' already listed' : '');
+                    status.style.color = 'green';
+                } else {
+                    status.textContent = 'No servers found';
+                    status.style.color = '#666';
+                }
+            } catch (err) {
+                status.textContent = 'Discovery failed: ' + err.message;
+                status.style.color = 'red';
+            }
+
+            btn.disabled = false;
+            setTimeout(() => { status.textContent = ''; }, 5000);
+        }
     </script>
 </body>
 </html>`
@@ -856,6 +920,100 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
+type DiscoveredServer struct {
+	Name     string `json:"name"`
+	Address  string `json:"address"`
+	URL      string `json:"url"`
+	Platform string `json:"platform"` // "jellyfin" or "emby"
+}
+
+func discoverServers() []DiscoveredServer {
+	var servers []DiscoveredServer
+	var mu sync.Mutex
+
+	// Discovery messages
+	queries := []struct {
+		message  string
+		platform string
+	}{
+		{"Who is JellyfinServer?", "jellyfin"},
+		{"who is EmbyServer?", "emby"},
+	}
+
+	for _, q := range queries {
+		go func(message, platform string) {
+			// Create UDP socket
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+			if err != nil {
+				log.Printf("Discovery: failed to create socket: %v", err)
+				return
+			}
+			defer conn.Close()
+
+			// Set read deadline
+			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+			// Broadcast address
+			broadcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 7359}
+
+			// Send discovery message
+			_, err = conn.WriteToUDP([]byte(message), broadcastAddr)
+			if err != nil {
+				log.Printf("Discovery: failed to send broadcast: %v", err)
+				return
+			}
+
+			// Listen for responses
+			buf := make([]byte, 4096)
+			for {
+				n, addr, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					break // Timeout or error
+				}
+
+				// Parse response (JSON)
+				var response struct {
+					Name      string `json:"Name"`
+					Address   string `json:"Address"`
+					LocalAddr string `json:"LocalAddress"`
+				}
+				if err := json.Unmarshal(buf[:n], &response); err != nil {
+					continue
+				}
+
+				// Build URL - prefer LocalAddress if available
+				serverURL := response.Address
+				if response.LocalAddr != "" {
+					serverURL = response.LocalAddr
+				}
+				if serverURL == "" {
+					serverURL = fmt.Sprintf("http://%s:8096", addr.IP.String())
+				}
+
+				mu.Lock()
+				servers = append(servers, DiscoveredServer{
+					Name:     response.Name,
+					Address:  addr.IP.String(),
+					URL:      serverURL + "/*",
+					Platform: platform,
+				})
+				mu.Unlock()
+			}
+		}(q.message, q.platform)
+	}
+
+	// Wait for discovery to complete
+	time.Sleep(3500 * time.Millisecond)
+
+	return servers
+}
+
+func discoverHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	servers := discoverServers()
+	json.NewEncoder(w).Encode(servers)
+}
+
 func main() {
 	// Determine config path (same directory as executable)
 	exe, err := os.Executable()
@@ -871,6 +1029,7 @@ func main() {
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/api/play", playHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
+	http.HandleFunc("/api/discover", discoverHandler)
 	http.HandleFunc("/config", configPageHandler)
 	http.HandleFunc("/install", installPageHandler)
 	http.HandleFunc("/extension.zip", extensionDownloadHandler)
