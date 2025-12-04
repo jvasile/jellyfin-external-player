@@ -35,11 +35,12 @@ type PlayerConfig struct {
 }
 
 type Config struct {
-	Port         int                     `json:"port"`
-	Player       string                  `json:"player"` // "mpv" or "vlc"
-	Players      map[string]PlayerConfig `json:"players"`
-	PathMappings []PathMapping           `json:"path_mappings"`
-	ServerURLs   []string                `json:"server_urls"` // Emby/Jellyfin server URLs
+	Port          int                     `json:"port"`
+	Player        string                  `json:"player"` // "mpv" or "vlc"
+	Players       map[string]PlayerConfig `json:"players"`
+	PathMappings  []PathMapping           `json:"path_mappings"`
+	ServerURLs    []string                `json:"server_urls"`     // Emby/Jellyfin server URLs
+	ServerURLsSet bool                    `json:"server_urls_set"` // true if user has explicitly set URLs
 }
 
 var (
@@ -60,10 +61,8 @@ func defaultConfig() Config {
 			{Type: "prefix", Match: "/mnt/jbod/007/media/Movies", Replace: `\\172.16.50.28\Movies`},
 			{Type: "prefix", Match: "/mnt/jbod/007/media/TV", Replace: `\\172.16.50.28\TV`},
 		},
-		ServerURLs: []string{
-			"http://localhost:8096/*",
-			"http://localhost:8920/*",
-		},
+		ServerURLs:    []string{}, // Will be populated by discovery
+		ServerURLsSet: false,
 	}
 }
 
@@ -570,6 +569,7 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		configMu.Lock()
 		config.ServerURLs = filtered
+		config.ServerURLsSet = true
 		saveConfigLocked()
 		configMu.Unlock()
 		http.Redirect(w, r, "/install?saved=1#userscript-content", http.StatusSeeOther)
@@ -695,6 +695,17 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
         }
         .discover-btn:hover { background: #7c3aed; }
         .discover-btn:disabled { background: #c4b5fd; cursor: wait; }
+        .reset-btn {
+            background: #6b7280;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+            margin-bottom: 15px;
+        }
+        .reset-btn:hover { background: #4b5563; }
         #discoverStatus { margin-left: 10px; color: #666; }
     </style>
 </head>
@@ -761,6 +772,7 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
             <h3>Step 2: Configure Server URLs</h3>
             <p>Enter the URLs of your Emby/Jellyfin servers, or discover them automatically.</p>
             <button type="button" class="discover-btn" onclick="discoverServers()">Discover Servers</button>
+            <button type="button" class="reset-btn" onclick="resetToDiscovery()">Reset to Auto-Discovery</button>
             <span id="discoverStatus"></span>
             <form method="POST" id="urlForm">
                 <div class="url-list" id="urlList">
@@ -831,14 +843,29 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 
             btn.disabled = true;
             status.textContent = 'Scanning network...';
+            status.style.color = '#666';
 
-            try {
+            // Start discovery
+            await fetch('/api/discover');
+
+            // Poll for results
+            let attempts = 0;
+            const maxAttempts = 8; // ~4 seconds
+
+            const poll = async () => {
+                attempts++;
                 const response = await fetch('/api/discover');
-                const servers = await response.json();
+                const data = await response.json();
 
-                if (servers && servers.length > 0) {
+                if (data.status === 'scanning' && attempts < maxAttempts) {
+                    setTimeout(poll, 500);
+                    return;
+                }
+
+                // Discovery complete
+                const servers = data.servers || [];
+                if (servers.length > 0) {
                     const urlList = document.getElementById('urlList');
-                    // Get existing URLs to avoid duplicates
                     const existing = new Set();
                     urlList.querySelectorAll('input').forEach(input => {
                         if (input.value) existing.add(input.value);
@@ -864,13 +891,55 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
                     status.textContent = 'No servers found';
                     status.style.color = '#666';
                 }
-            } catch (err) {
-                status.textContent = 'Discovery failed: ' + err.message;
-                status.style.color = 'red';
+
+                btn.disabled = false;
+                setTimeout(() => { status.textContent = ''; }, 5000);
+            };
+
+            setTimeout(poll, 500);
+        }
+
+        // Check if servers were auto-discovered on page load
+        (async function checkAutoDiscovery() {
+            const response = await fetch('/api/discover');
+            const data = await response.json();
+            if (data.servers && data.servers.length > 0) {
+                const urlList = document.getElementById('urlList');
+                const inputs = urlList.querySelectorAll('input');
+                // Only auto-fill if the list is empty or has just the placeholder
+                if (inputs.length === 0 || (inputs.length === 1 && !inputs[0].value)) {
+                    if (inputs.length === 1) inputs[0].remove();
+                    data.servers.forEach(server => {
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.name = 'server_url';
+                        input.value = server.url;
+                        input.className = 'url-input';
+                        input.title = server.name + ' (' + server.platform + ')';
+                        urlList.appendChild(input);
+                    });
+                }
+            }
+        })();
+
+        async function resetToDiscovery() {
+            if (!confirm('This will clear your saved server URLs and re-scan the network. Continue?')) {
+                return;
             }
 
-            btn.disabled = false;
-            setTimeout(() => { status.textContent = ''; }, 5000);
+            const status = document.getElementById('discoverStatus');
+            status.textContent = 'Resetting...';
+            status.style.color = '#666';
+
+            // Clear the URL list
+            const urlList = document.getElementById('urlList');
+            urlList.innerHTML = '<input type="text" name="server_url" placeholder="http://myserver:8096/*" class="url-input">';
+
+            // Call reset API
+            await fetch('/api/discover/reset');
+
+            // Now run discovery
+            discoverServers();
         }
     </script>
 </body>
@@ -927,9 +996,31 @@ type DiscoveredServer struct {
 	Platform string `json:"platform"` // "jellyfin" or "emby"
 }
 
-func discoverServers() []DiscoveredServer {
+var (
+	discoveryRunning bool
+	discoveryMu      sync.Mutex
+	lastDiscovery    []DiscoveredServer
+)
+
+// runDiscovery performs network discovery and optionally updates config
+func runDiscovery(updateConfig bool) []DiscoveredServer {
+	discoveryMu.Lock()
+	if discoveryRunning {
+		discoveryMu.Unlock()
+		return nil
+	}
+	discoveryRunning = true
+	discoveryMu.Unlock()
+
+	defer func() {
+		discoveryMu.Lock()
+		discoveryRunning = false
+		discoveryMu.Unlock()
+	}()
+
 	var servers []DiscoveredServer
 	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	// Discovery messages
 	queries := []struct {
@@ -941,7 +1032,10 @@ func discoverServers() []DiscoveredServer {
 	}
 
 	for _, q := range queries {
+		wg.Add(1)
 		go func(message, platform string) {
+			defer wg.Done()
+
 			// Create UDP socket
 			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 			if err != nil {
@@ -998,20 +1092,95 @@ func discoverServers() []DiscoveredServer {
 					Platform: platform,
 				})
 				mu.Unlock()
+
+				log.Printf("Discovery: found %s server %q at %s", platform, response.Name, serverURL)
 			}
 		}(q.message, q.platform)
 	}
 
-	// Wait for discovery to complete
-	time.Sleep(3500 * time.Millisecond)
+	wg.Wait()
+
+	discoveryMu.Lock()
+	lastDiscovery = servers
+	discoveryMu.Unlock()
+
+	// Update config if requested and servers were found
+	if updateConfig && len(servers) > 0 {
+		configMu.Lock()
+		if !config.ServerURLsSet {
+			// Add discovered URLs to config (avoid duplicates)
+			existing := make(map[string]bool)
+			for _, u := range config.ServerURLs {
+				existing[u] = true
+			}
+			for _, s := range servers {
+				if !existing[s.URL] {
+					config.ServerURLs = append(config.ServerURLs, s.URL)
+					existing[s.URL] = true
+				}
+			}
+			saveConfigLocked()
+			log.Printf("Discovery: auto-configured %d server URL(s)", len(config.ServerURLs))
+		}
+		configMu.Unlock()
+	}
 
 	return servers
 }
 
+// startBackgroundDiscovery runs discovery in the background
+func startBackgroundDiscovery() {
+	go runDiscovery(true)
+}
+
 func discoverHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	servers := discoverServers()
-	json.NewEncoder(w).Encode(servers)
+
+	// Check if discovery is already running
+	discoveryMu.Lock()
+	running := discoveryRunning
+	cached := lastDiscovery
+	discoveryMu.Unlock()
+
+	if running {
+		// Return cached results or empty while scanning
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "scanning",
+			"servers": cached,
+		})
+		return
+	}
+
+	// Start async discovery
+	go runDiscovery(false) // Don't auto-update config from manual trigger
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "started",
+		"servers": cached,
+	})
+}
+
+func resetDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// Clear user-set flag and URLs, then start discovery
+	configMu.Lock()
+	config.ServerURLs = []string{}
+	config.ServerURLsSet = false
+	saveConfigLocked()
+	configMu.Unlock()
+
+	// Clear cached discovery results
+	discoveryMu.Lock()
+	lastDiscovery = nil
+	discoveryMu.Unlock()
+
+	// Start fresh discovery
+	go runDiscovery(true)
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "reset",
+	})
 }
 
 func main() {
@@ -1026,10 +1195,17 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// Auto-discover servers on startup if not configured by user
+	if !config.ServerURLsSet {
+		log.Printf("Server URLs not configured, starting network discovery...")
+		startBackgroundDiscovery()
+	}
+
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/api/play", playHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
 	http.HandleFunc("/api/discover", discoverHandler)
+	http.HandleFunc("/api/discover/reset", resetDiscoveryHandler)
 	http.HandleFunc("/config", configPageHandler)
 	http.HandleFunc("/install", installPageHandler)
 	http.HandleFunc("/extension.zip", extensionDownloadHandler)
