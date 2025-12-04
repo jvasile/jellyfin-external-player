@@ -739,6 +739,8 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
         .reset-btn { background: #6b7280; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-left: 10px; margin-bottom: 15px; }
         .reset-btn:hover { background: #4b5563; }
         #discoverStatus { margin-left: 10px; color: #666; }
+        .install-btn { display: inline-block; padding: 12px 24px; background: #10b981; color: white; text-decoration: none; border-radius: 6px; font-size: 16px; }
+        .install-btn:hover { background: #059669; color: white; }
     </style>
 </head>
 <body>
@@ -778,7 +780,8 @@ func installUserscriptHandler(w http.ResponseWriter, r *http.Request) {
 
     <div class="browser-section">
         <h3>Step 3: Install the Userscript</h3>
-        <p>Direct link (reload to reinstall): <code><a href="/embyfin-kiosk.user.js">http://localhost:9999/embyfin-kiosk.user.js</a></code></p>
+        <a href="/embyfin-kiosk.user.js" class="install-btn">Install Userscript</a>
+        <p style="margin-top: 10px; font-size: 13px; color: #666;">If you change the server URLs, reinstall the userscript to pick up the changes.</p>
     </div>
 
     <h2>After Installation</h2>
