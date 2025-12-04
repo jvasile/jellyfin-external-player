@@ -1181,6 +1181,8 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/javascript")
+	// Cache for 1 hour - shift-reload will bypass cache
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 
 	// Try to read from disk first (allows editing without restart during development)
 	scriptBytes, err := os.ReadFile("extension/embyfin-kiosk.js")
