@@ -700,6 +700,47 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Embyfin Kiosk</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 80px auto; padding: 20px; text-align: center; }
+        h1 { margin-bottom: 10px; }
+        .subtitle { color: #666; margin-bottom: 40px; }
+        .links { display: flex; flex-direction: column; gap: 15px; align-items: center; }
+        a {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #3b82f6;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            min-width: 200px;
+        }
+        a:hover { background: #2563eb; }
+        .status { margin-top: 40px; padding: 15px; background: #f0fdf4; border-radius: 8px; color: #166534; }
+    </style>
+</head>
+<body>
+    <h1>Embyfin Kiosk</h1>
+    <p class="subtitle">External player launcher for Emby/Jellyfin</p>
+    <div class="links">
+        <a href="/install">Install Browser Extension</a>
+        <a href="/config">Configuration</a>
+    </div>
+    <div class="status">Server running</div>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
+}
+
 func main() {
 	// Determine config path (same directory as executable)
 	exe, err := os.Executable()
@@ -712,6 +753,7 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/api/play", playHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
 	http.HandleFunc("/config", configPageHandler)
