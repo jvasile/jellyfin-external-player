@@ -1,8 +1,12 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +16,9 @@ import (
 	"strings"
 	"sync"
 )
+
+//go:embed extension/*
+var extensionFS embed.FS
 
 type PathMapping struct {
 	Type    string `json:"type"`    // "prefix", "wildcard", or "regex"
@@ -334,6 +341,10 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
         <span class="success" id="savedMsg" style="display: none;">Saved!</span>
     </form>
 
+    <p style="margin-top: 30px;">
+        <a href="/install">Install Browser Extension</a>
+    </p>
+
     <script>
         // Show saved message if redirected with ?saved=1
         if (window.location.search.includes('saved=1')) {
@@ -410,6 +421,285 @@ func configAPIHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(config)
 }
 
+func extensionDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	// Create a zip file in memory
+	buf := new(bytes.Buffer)
+	zipWriter := zip.NewWriter(buf)
+
+	// Walk the embedded extension directory
+	err := fs.WalkDir(extensionFS, "extension", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		// Read the file
+		data, err := extensionFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		// Create file in zip (strip "extension/" prefix)
+		zipPath := strings.TrimPrefix(path, "extension/")
+		f, err := zipWriter.Create(zipPath)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(data)
+		return err
+	})
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create zip: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	zipWriter.Close()
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=embyfin-kiosk-extension.zip")
+	w.Write(buf.Bytes())
+}
+
+func userscriptHandler(w http.ResponseWriter, r *http.Request) {
+	// Read content.js from embedded FS
+	contentJS, err := extensionFS.ReadFile("extension/content.js")
+	if err != nil {
+		http.Error(w, "Failed to read content.js", http.StatusInternalServerError)
+		return
+	}
+
+	// Userscript header
+	header := `// ==UserScript==
+// @name         Embyfin Kiosk
+// @namespace    https://github.com/jvasile/embyfin-kiosk
+// @version      1.0.0
+// @description  Play Emby/Jellyfin videos in external player (mpv/VLC) via local server
+// @match        *://*/*
+// @grant        GM_xmlhttpRequest
+// @connect      localhost
+// @connect      127.0.0.1
+// ==/UserScript==
+
+`
+
+	// Replacement function using GM_xmlhttpRequest
+	gmFunction := `    // ==PLAY_FUNCTION_START==
+    // Send play request to local kiosk server via GM_xmlhttpRequest
+    function playInExternalPlayer(path) {
+        const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: url,
+            onload: function(response) {
+                if (response.status === 200) {
+                    console.log('Embyfin Kiosk: Playing in external player');
+                } else {
+                    console.error('Embyfin Kiosk: Server error', response.status);
+                    alert('Embyfin Kiosk: Server returned error ' + response.status);
+                }
+            },
+            onerror: function(error) {
+                console.error('Embyfin Kiosk: Failed to connect', error);
+                alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
+            }
+        });
+    }
+    // ==PLAY_FUNCTION_END==`
+
+	// Replace the chrome.runtime.sendMessage version with GM_xmlhttpRequest version
+	script := string(contentJS)
+
+	// Find and replace the function between markers
+	startMarker := "    // ==PLAY_FUNCTION_START=="
+	endMarker := "    // ==PLAY_FUNCTION_END=="
+
+	startIdx := strings.Index(script, startMarker)
+	endIdx := strings.Index(script, endMarker)
+
+	if startIdx != -1 && endIdx != -1 {
+		endIdx += len(endMarker)
+		script = script[:startIdx] + gmFunction + script[endIdx:]
+	}
+
+	// Remove the extension-specific comment
+	script = strings.Replace(script,
+		"// Content script injected into Emby/Jellyfin pages\n// This file is shared between the browser extension and userscript",
+		"// Embyfin Kiosk Userscript\n// Generated from extension/content.js",
+		1)
+
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Write([]byte(header + script))
+}
+
+func installPageHandler(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Install Embyfin Kiosk</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; line-height: 1.6; }
+        h1 { margin-bottom: 30px; }
+        h2 { margin-top: 30px; color: #333; }
+        h3 { margin-top: 20px; color: #555; }
+        .download-btn {
+            display: inline-block;
+            padding: 15px 30px;
+            font-size: 18px;
+            background: #3b82f6;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .download-btn:hover { background: #2563eb; }
+        .download-btn.secondary {
+            background: #10b981;
+        }
+        .download-btn.secondary:hover { background: #059669; }
+        ol { padding-left: 20px; }
+        li { margin-bottom: 10px; }
+        code {
+            background: #f1f5f9;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .browser-section {
+            background: #f9fafb;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .note {
+            background: #fef3c7;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .method-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .method-tab {
+            padding: 10px 20px;
+            border: 2px solid #3b82f6;
+            border-radius: 8px;
+            cursor: pointer;
+            background: white;
+            font-size: 16px;
+        }
+        .method-tab.active {
+            background: #3b82f6;
+            color: white;
+        }
+        .method-content { display: none; }
+        .method-content.active { display: block; }
+    </style>
+</head>
+<body>
+    <h1>Install Embyfin Kiosk</h1>
+
+    <div class="method-tabs">
+        <button class="method-tab active" onclick="showMethod('extension')">Browser Extension</button>
+        <button class="method-tab" onclick="showMethod('userscript')">Userscript</button>
+    </div>
+
+    <div id="extension-content" class="method-content active">
+        <a href="/extension.zip" class="download-btn">Download Extension</a>
+
+        <div class="browser-section">
+            <h3>Chrome / Edge / Brave</h3>
+            <ol>
+                <li>Download and extract the zip file</li>
+                <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>)</li>
+                <li>Enable "Developer mode" (toggle in top right)</li>
+                <li>Click "Load unpacked"</li>
+                <li>Select the extracted folder</li>
+            </ol>
+        </div>
+
+        <div class="browser-section">
+            <h3>Firefox</h3>
+            <ol>
+                <li>Download and extract the zip file</li>
+                <li>Open <code>about:debugging#/runtime/this-firefox</code></li>
+                <li>Click "Load Temporary Add-on"</li>
+                <li>Select any file in the extracted folder (e.g., manifest.json)</li>
+            </ol>
+            <div class="note">
+                <strong>Note:</strong> Temporary add-ons are removed when Firefox closes.
+                For permanent installation, the extension needs to be signed by Mozilla.
+            </div>
+        </div>
+
+        <h2>After Installation</h2>
+        <ol>
+            <li>Click the extension icon in your browser toolbar</li>
+            <li>Verify the server URL is <code>http://localhost:9999</code></li>
+            <li>The status should show "Server running"</li>
+            <li>Navigate to your Emby or Jellyfin server</li>
+            <li>Click play on any movie or episode, or press <strong>K</strong></li>
+        </ol>
+    </div>
+
+    <div id="userscript-content" class="method-content">
+        <p>Userscripts work with a userscript manager like Tampermonkey, Violentmonkey, or Greasemonkey.</p>
+
+        <a href="/embyfin-kiosk.user.js" class="download-btn secondary">Install Userscript</a>
+
+        <div class="browser-section">
+            <h3>Step 1: Install a Userscript Manager</h3>
+            <p>If you don't already have one, install a userscript manager for your browser:</p>
+            <ul>
+                <li><strong>Tampermonkey</strong> - Available for Chrome, Firefox, Edge, Safari</li>
+                <li><strong>Violentmonkey</strong> - Available for Chrome, Firefox, Edge</li>
+                <li><strong>Greasemonkey</strong> - Firefox only</li>
+            </ul>
+        </div>
+
+        <div class="browser-section">
+            <h3>Step 2: Install the Userscript</h3>
+            <ol>
+                <li>Click the "Install Userscript" button above</li>
+                <li>Your userscript manager should detect it and offer to install</li>
+                <li>Click "Install" or "Confirm"</li>
+            </ol>
+        </div>
+
+        <div class="note">
+            <strong>Note:</strong> The userscript connects to <code>http://localhost:9999</code> by default.
+            To change this, edit the <code>KIOSK_SERVER</code> constant at the top of the script.
+        </div>
+
+        <h2>After Installation</h2>
+        <ol>
+            <li>Navigate to your Emby or Jellyfin server</li>
+            <li>Click play on any movie or episode, or press <strong>K</strong></li>
+        </ol>
+    </div>
+
+    <p style="margin-top: 40px;">
+        <a href="/config">← Back to Configuration</a>
+    </p>
+
+    <script>
+        function showMethod(method) {
+            document.querySelectorAll('.method-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.method-content').forEach(c => c.classList.remove('active'));
+            document.querySelector('.method-tab[onclick*="' + method + '"]').classList.add('active');
+            document.getElementById(method + '-content').classList.add('active');
+        }
+    </script>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
+}
+
 func main() {
 	// Determine config path (same directory as executable)
 	exe, err := os.Executable()
@@ -425,6 +715,9 @@ func main() {
 	http.HandleFunc("/api/play", playHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
 	http.HandleFunc("/config", configPageHandler)
+	http.HandleFunc("/install", installPageHandler)
+	http.HandleFunc("/extension.zip", extensionDownloadHandler)
+	http.HandleFunc("/embyfin-kiosk.user.js", userscriptHandler)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", config.Port)
 	log.Printf("Starting server on %s", addr)

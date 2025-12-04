@@ -1,9 +1,27 @@
 // Content script injected into Emby/Jellyfin pages
+// This file is shared between the browser extension and userscript
 
 (function() {
     'use strict';
 
     const KIOSK_SERVER = 'http://localhost:9999';
+
+    // ==PLAY_FUNCTION_START==
+    // Send play request to local kiosk server via background script
+    function playInExternalPlayer(path) {
+        chrome.runtime.sendMessage({
+            action: 'play',
+            path: path
+        }, function(response) {
+            if (response && response.success) {
+                console.log('Embyfin Kiosk: Playing in external player');
+            } else {
+                console.error('Embyfin Kiosk: Failed to play', response);
+                alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
+            }
+        });
+    }
+    // ==PLAY_FUNCTION_END==
 
     // Check if this looks like an Emby/Jellyfin page
     function isEmbyfinPage() {
@@ -65,21 +83,6 @@
 
         const data = await response.json();
         return data.Path;
-    }
-
-    // Send play request to local kiosk server via background script
-    function playInExternalPlayer(path) {
-        chrome.runtime.sendMessage({
-            action: 'play',
-            path: path
-        }, function(response) {
-            if (response && response.success) {
-                console.log('Embyfin Kiosk: Playing in external player');
-            } else {
-                console.error('Embyfin Kiosk: Failed to play', response);
-                alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
-            }
-        });
     }
 
     // Extract item ID from URL or element
