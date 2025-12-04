@@ -106,9 +106,10 @@ func saveConfig() error {
 	return saveConfigLocked()
 }
 
-// wildcardToRegex converts a wildcard pattern to a regex
+// wildcardToRegex converts a wildcard pattern to a regex for prefix-style matching
 // * matches anything except /
 // ** matches anything including /
+// The pattern matches the beginning of the path, and captures the remainder
 func wildcardToRegex(pattern string) (*regexp.Regexp, error) {
 	var result strings.Builder
 	result.WriteString("^")
@@ -116,7 +117,7 @@ func wildcardToRegex(pattern string) (*regexp.Regexp, error) {
 	i := 0
 	for i < len(pattern) {
 		if i+1 < len(pattern) && pattern[i] == '*' && pattern[i+1] == '*' {
-			result.WriteString("(.*)")
+			result.WriteString("(.*?)")
 			i += 2
 		} else if pattern[i] == '*' {
 			result.WriteString("([^/]*)")
@@ -131,6 +132,8 @@ func wildcardToRegex(pattern string) (*regexp.Regexp, error) {
 		}
 	}
 
+	// Capture the remainder of the path
+	result.WriteString("(.*)")
 	result.WriteString("$")
 	return regexp.Compile(result.String())
 }
@@ -151,14 +154,17 @@ func applyMapping(path string, mapping PathMapping) (string, bool) {
 			log.Printf("Invalid wildcard pattern %q: %v", mapping.Match, err)
 			return path, false
 		}
-		if re.MatchString(path) {
-			// Replace {1}, {2}, etc. with captured groups
-			matches := re.FindStringSubmatch(path)
+		matches := re.FindStringSubmatch(path)
+		if matches != nil {
+			// Last capture group is the remainder of the path
+			remainder := matches[len(matches)-1]
+			// Replace {1}, {2}, etc. with captured groups (excluding remainder)
 			result := mapping.Replace
-			for i := 1; i < len(matches); i++ {
+			for i := 1; i < len(matches)-1; i++ {
 				result = strings.ReplaceAll(result, fmt.Sprintf("{%d}", i), matches[i])
 			}
-			return result, true
+			// Append the remainder
+			return result + remainder, true
 		}
 		return path, false
 
@@ -594,26 +600,40 @@ func helpMappingsHandler(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <h3>2. Wildcard</h3>
-    <p>Pattern matching with wildcards. Use <code>*</code> to match a single path segment, <code>**</code> to match any number of segments.</p>
+    <p>Like prefix, but with wildcards in the pattern. The remainder of the path is automatically appended.</p>
     <table>
         <tr><th>Pattern</th><th>Matches</th></tr>
         <tr><td><code>*</code></td><td>Any characters except <code>/</code></td></tr>
         <tr><td><code>**</code></td><td>Any characters including <code>/</code></td></tr>
     </table>
-    <p>Use <code>{1}</code>, <code>{2}</code>, etc. in the replacement to reference captured groups.</p>
+    <p>Use <code>{1}</code>, <code>{2}</code>, etc. in the replacement to reference captured wildcards.</p>
     <div class="example">
-        <div class="example-title">Example: Match any server, capture the rest</div>
+        <div class="example-title">Example: Match any server IP</div>
         <table>
             <tr><th>Type</th><td><code>wildcard</code></td></tr>
-            <tr><th>Match</th><td><code>nfs://*/mnt/jbod/007/media/Movies/**</code></td></tr>
-            <tr><th>Replace</th><td><code>\\172.16.50.28\Movies\{2}</code></td></tr>
+            <tr><th>Match</th><td><code>nfs://*/mnt/jbod/007/media/Movies</code></td></tr>
+            <tr><th>Replace</th><td><code>\\172.16.50.28\Movies</code></td></tr>
         </table>
         <p>
             <code>nfs://192.168.1.28/mnt/jbod/007/media/Movies/Inception/Inception.mkv</code><br>
             <span class="arrow">&darr;</span><br>
-            <code>\\172.16.50.28\Movies\Inception/Inception.mkv</code>
+            <code>\\172.16.50.28\Movies/Inception/Inception.mkv</code>
         </p>
-        <p><small>Note: <code>{1}</code> = <code>192.168.1.28</code>, <code>{2}</code> = <code>Inception/Inception.mkv</code></small></p>
+        <p><small>The <code>*</code> matches <code>192.168.1.28</code>. The rest of the path (<code>/Inception/Inception.mkv</code>) is automatically appended.</small></p>
+    </div>
+    <div class="example">
+        <div class="example-title">Example: Match variable path depth with **</div>
+        <table>
+            <tr><th>Type</th><td><code>wildcard</code></td></tr>
+            <tr><th>Match</th><td><code>nfs://**/media/Movies</code></td></tr>
+            <tr><th>Replace</th><td><code>\\172.16.50.28\Movies</code></td></tr>
+        </table>
+        <p>
+            <code>nfs://192.168.1.28/mnt/jbod/007/media/Movies/Inception/Inception.mkv</code><br>
+            <span class="arrow">&darr;</span><br>
+            <code>\\172.16.50.28\Movies/Inception/Inception.mkv</code>
+        </p>
+        <p><small>The <code>**</code> matches <code>192.168.1.28/mnt/jbod/007</code> (everything up to <code>/media/Movies</code>).</small></p>
     </div>
 
     <h3>3. Regex</h3>
