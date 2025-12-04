@@ -53,6 +53,12 @@ var (
 	configMu   sync.RWMutex
 )
 
+// PlaylistItem represents one item in a playlist
+type PlaylistItem struct {
+	Path   string `json:"path"`
+	ItemId string `json:"itemId"`
+}
+
 // Player state tracking
 var (
 	currentPlayer   *exec.Cmd
@@ -61,6 +67,9 @@ var (
 	mpvIPCPath      string  // Named pipe path for mpv IPC
 	lastPosition    float64 // Last known playback position in seconds
 	videoDuration   float64 // Total video duration in seconds
+	// Playlist tracking
+	playlist         []PlaylistItem
+	playlistPosition int // Current position in playlist (0-indexed)
 	// Emby API info for progress reporting
 	embyServerURL string
 	embyUserId    string
@@ -626,6 +635,219 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		"status": "playing",
 		"path":   translatedPath,
 	})
+}
+
+// PlaylistRequest is the JSON body for /api/playlist
+type PlaylistRequest struct {
+	Items     []PlaylistItem `json:"items"`
+	ServerURL string         `json:"serverUrl"`
+	UserID    string         `json:"userId"`
+	Token     string         `json:"token"`
+	Resume    bool           `json:"resume"`
+}
+
+func playlistHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PlaylistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Items) == 0 {
+		http.Error(w, "empty playlist", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Playing playlist of %d items", len(req.Items))
+
+	// Translate all paths
+	var translatedPaths []string
+	for i, item := range req.Items {
+		translated := translatePath(item.Path)
+		translatedPaths = append(translatedPaths, translated)
+		log.Printf("  [%d] %s -> %s", i, item.Path, translated)
+	}
+
+	// Get resume position for first item if requested
+	var startSeconds float64
+	if req.Resume && req.ServerURL != "" && req.UserID != "" && req.Token != "" && req.Items[0].ItemId != "" {
+		if storedPosition := getStoredPosition(req.ServerURL, req.UserID, req.Token, req.Items[0].ItemId); storedPosition > 0 {
+			startSeconds = storedPosition
+			log.Printf("Resume position for first item: %.1f seconds", startSeconds)
+		}
+	}
+
+	configMu.RLock()
+	playerKey := config.Player
+	playerConfig, ok := config.Players[playerKey]
+	urlEncode := config.URLEncode
+	configMu.RUnlock()
+
+	if !ok {
+		log.Printf("Unknown player %q, falling back to mpv", playerKey)
+		playerConfig = PlayerConfig{Path: "mpv", Args: []string{"--fs"}}
+	}
+
+	args := append([]string{}, playerConfig.Args...)
+
+	// Add IPC socket for mpv
+	var ipcPath string
+	if playerKey == "mpv" {
+		ipcPath = getMpvIPCPath()
+		args = append(args, "--input-ipc-server="+ipcPath)
+
+		if startSeconds > 0 {
+			args = append(args, fmt.Sprintf("--start=%.1f", startSeconds))
+			log.Printf("Starting playback at %.1f seconds", startSeconds)
+		}
+	}
+
+	// Add all paths to command line
+	for _, path := range translatedPaths {
+		pathForPlayer := path
+		if urlEncode {
+			pathForPlayer = url.PathEscape(path)
+		}
+		args = append(args, pathForPlayer)
+	}
+
+	cmd := exec.Command(playerConfig.Path, args...)
+	if err := cmd.Start(); err != nil {
+		log.Printf("Error starting player: %v", err)
+		http.Error(w, fmt.Sprintf("failed to start player: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Track state
+	currentPlayerMu.Lock()
+	currentPlayer = cmd
+	playlist = req.Items
+	playlistPosition = 0
+	playerItemId = req.Items[0].ItemId
+	mpvIPCPath = ipcPath
+	lastPosition = 0
+	videoDuration = 0
+	embyServerURL = req.ServerURL
+	embyUserId = req.UserID
+	embyToken = req.Token
+	currentPlayerMu.Unlock()
+
+	log.Printf("Stored Emby info: server=%s, userId=%s, hasToken=%v", req.ServerURL, req.UserID, req.Token != "")
+
+	// Report playback started
+	go reportPlaybackStart()
+
+	// Monitor playlist position and wait for player to finish
+	go monitorPlaylist(cmd, ipcPath)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "playing",
+		"items":  len(req.Items),
+	})
+}
+
+// monitorPlaylist tracks playlist position and reports progress for each item
+func monitorPlaylist(cmd *exec.Cmd, ipcPath string) {
+	lastPos := 0
+
+	// Poll playlist position every second
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		cmd.Wait()
+		close(done)
+	}()
+
+	for {
+		select {
+		case <-done:
+			// Player exited - report final item stopped
+			if ipcPath != "" {
+				getMpvPlaybackInfo()
+			}
+			reportPlaybackStopped()
+
+			currentPlayerMu.Lock()
+			if currentPlayer == cmd {
+				currentPlayer = nil
+				playerItemId = ""
+				mpvIPCPath = ""
+				playlist = nil
+				playlistPosition = 0
+				embyServerURL = ""
+				embyUserId = ""
+				embyToken = ""
+			}
+			currentPlayerMu.Unlock()
+			log.Printf("Player exited")
+			return
+
+		case <-ticker.C:
+			if ipcPath == "" {
+				continue
+			}
+
+			// Query current playlist position from mpv
+			pos, err := queryMpvProperty(ipcPath, "playlist-pos")
+			if err != nil {
+				continue
+			}
+
+			posInt, ok := pos.(float64)
+			if !ok {
+				continue
+			}
+
+			newPos := int(posInt)
+			if newPos != lastPos && newPos >= 0 {
+				currentPlayerMu.Lock()
+				plist := playlist
+				currentPlayerMu.Unlock()
+
+				if newPos < len(plist) {
+					// Position changed - report previous item complete
+					log.Printf("Playlist position changed: %d -> %d", lastPos, newPos)
+
+					// Mark previous item as complete
+					if lastPos >= 0 && lastPos < len(plist) {
+						currentPlayerMu.Lock()
+						playerItemId = plist[lastPos].ItemId
+						lastPosition = videoDuration // Set to end
+						currentPlayerMu.Unlock()
+						reportPlaybackStopped()
+					}
+
+					// Start tracking new item
+					currentPlayerMu.Lock()
+					playlistPosition = newPos
+					playerItemId = plist[newPos].ItemId
+					lastPosition = 0
+					videoDuration = 0
+					currentPlayerMu.Unlock()
+
+					reportPlaybackStart()
+					lastPos = newPos
+				}
+			}
+		}
+	}
 }
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
@@ -1864,6 +2086,7 @@ func main() {
 
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/api/play", playHandler)
+	http.HandleFunc("/api/playlist", playlistHandler)
 	http.HandleFunc("/api/stop", stopHandler)
 	http.HandleFunc("/api/status", statusHandler)
 	http.HandleFunc("/api/config", configAPIHandler)

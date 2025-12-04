@@ -21,6 +21,7 @@
     let currentItemId = null;
     let lastKnownPosition = 0;
     let lastKnownDuration = 0;
+    let bypassUntil = 0; // Timestamp until which we should not intercept
 
     // Create and show the modal overlay
     function showModal(message) {
@@ -225,8 +226,13 @@
                typeof window.ApiClient !== 'undefined';
     }
 
-    // Fetch item details from Jellyfin API
-    async function getItemPath(itemId) {
+    // Video types we should intercept (everything else uses native Jellyfin)
+    const VIDEO_TYPES = ['Movie', 'Episode', 'MusicVideo', 'Video', 'Trailer'];
+    // Container types that should be expanded into playlists
+    const CONTAINER_TYPES = ['Season', 'Series', 'Playlist', 'BoxSet'];
+
+    // Fetch item details from Jellyfin API - returns {type, path} or null
+    async function getItemInfo(itemId) {
         const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : null;
         const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : null;
 
@@ -241,8 +247,94 @@
             throw new Error(`API request failed: ${response.status}`);
         }
 
-        const data = await response.json();
+        return await response.json();
+    }
+
+    // Legacy function for single video playback
+    async function getItemPath(itemId) {
+        const data = await getItemInfo(itemId);
+
+        // Only intercept video types
+        if (!VIDEO_TYPES.includes(data.Type)) {
+            debugLog('Skipping non-video type:', data.Type, 'for item:', itemId);
+            return null;
+        }
+
         return data.Path;
+    }
+
+    // Fetch all child episodes for a container (Season, Series, etc.)
+    async function getChildEpisodes(itemId, itemType) {
+        const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : null;
+        const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : null;
+
+        if (!userId || !token) {
+            throw new Error('Not authenticated');
+        }
+
+        // Build query to get child items
+        let url = `${window.location.origin}/Users/${userId}/Items?api_key=${encodeURIComponent(token)}`;
+        url += `&ParentId=${encodeURIComponent(itemId)}`;
+        url += `&IncludeItemTypes=Episode`;
+        url += `&Recursive=true`;
+        url += `&SortBy=SortName`;
+        url += `&SortOrder=Ascending`;
+        url += `&Fields=Path`;
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        debugLog('Found', data.Items.length, 'episodes for', itemType, itemId);
+
+        return data.Items.map(item => ({
+            path: item.Path,
+            itemId: item.Id
+        }));
+    }
+
+    // Play a playlist via the server
+    async function playPlaylist(items, isResume) {
+        if (!items || items.length === 0) {
+            console.error('JF External Player: Empty playlist');
+            return;
+        }
+
+        showModal(`Loading playlist (${items.length} items)...`);
+
+        const serverUrl = window.location.origin;
+        const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : '';
+        const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : '';
+
+        const payload = {
+            items: items,
+            serverUrl: serverUrl,
+            userId: userId,
+            token: token,
+            resume: isResume
+        };
+
+        try {
+            const response = await fetch(KIOSK_SERVER + '/api/playlist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server returned ${response.status}`);
+            }
+
+            const result = await response.json();
+            debugLog('Playlist started:', result);
+            updateModalStatus(`Playing playlist (${items.length} items)...`);
+        } catch (err) {
+            console.error('JF External Player: Playlist error:', err);
+            updateModalStatus('Failed to start playlist: ' + err.message, true);
+            setTimeout(() => hideModal(false), 3000);
+        }
     }
 
     // Extract item ID from URL or element
@@ -308,6 +400,11 @@
 
     // Handle play button click
     async function handlePlayClick(event, isResume) {
+        // Check for bypass flag (re-triggered click for non-video)
+        if (event.target.dataset && event.target.dataset.jfExternalBypass) {
+            return; // Let native handler process this
+        }
+
         let itemId = extractItemId(event.target);
 
         if (!itemId) {
@@ -326,13 +423,33 @@
         event.stopImmediatePropagation();
 
         try {
-            const path = await getItemPath(itemId);
-            if (path) {
-                console.log('JF External Player: Playing', path, 'isResume:', isResume);
-                playInExternalPlayer(path, itemId, isResume);
+            const itemInfo = await getItemInfo(itemId);
+            debugLog('Item info:', itemInfo.Type, itemInfo.Name);
+
+            if (VIDEO_TYPES.includes(itemInfo.Type)) {
+                // Single video - play directly
+                console.log('JF External Player: Playing', itemInfo.Path, 'isResume:', isResume);
+                playInExternalPlayer(itemInfo.Path, itemId, isResume);
+            } else if (CONTAINER_TYPES.includes(itemInfo.Type)) {
+                // Container (Season, Series, etc.) - get child episodes and play as playlist
+                debugLog('Expanding container:', itemInfo.Type);
+                const episodes = await getChildEpisodes(itemId, itemInfo.Type);
+                if (episodes.length > 0) {
+                    console.log('JF External Player: Playing playlist of', episodes.length, 'episodes');
+                    await playPlaylist(episodes, isResume);
+                } else {
+                    console.error('JF External Player: No episodes found in', itemInfo.Type);
+                }
+            } else {
+                // Unknown type - let native Jellyfin handle it
+                debugLog('Re-triggering click for native handling, type:', itemInfo.Type);
+                const target = event.target;
+                target.dataset.jfExternalBypass = 'true';
+                target.click();
+                delete target.dataset.jfExternalBypass;
             }
         } catch (err) {
-            console.error('JF External Player: Error getting item path', err);
+            console.error('JF External Player: Error:', err);
         }
     }
 
