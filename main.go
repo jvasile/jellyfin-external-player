@@ -247,11 +247,55 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	return s
+}
+
+func selected(b bool) string {
+	if b {
+		return " selected"
+	}
+	return ""
+}
+
 func configPageHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		configMu.RLock()
-		configJSON, _ := json.MarshalIndent(config, "", "  ")
+		currentPlayer := config.Player
+		mappings := config.PathMappings
 		configMu.RUnlock()
+
+		// Build mapping rows HTML
+		var mappingRows strings.Builder
+		for i, m := range mappings {
+			mappingRows.WriteString(fmt.Sprintf(`
+            <div class="mapping-row" data-index="%d">
+                <select name="mapping_type_%d" class="mapping-type">
+                    <option value="prefix"%s>prefix</option>
+                    <option value="regex"%s>regex</option>
+                </select>
+                <input type="text" name="mapping_match_%d" value="%s" placeholder="Match pattern" class="mapping-match">
+                <span class="arrow">→</span>
+                <input type="text" name="mapping_replace_%d" value="%s" placeholder="Replace with" class="mapping-replace">
+                <button type="button" class="remove-btn" onclick="removeMapping(this)">×</button>
+            </div>`,
+				i, i,
+				selected(m.Type == "prefix"), selected(m.Type == "regex"),
+				i, escapeHTML(m.Match),
+				i, escapeHTML(m.Replace)))
+		}
+
+		playerMpvSelected := ""
+		playerVlcSelected := ""
+		if currentPlayer == "vlc" {
+			playerVlcSelected = " selected"
+		} else {
+			playerMpvSelected = " selected"
+		}
 
 		html := `<!DOCTYPE html>
 <html>
@@ -260,91 +304,101 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
     <style>
         body { font-family: system-ui, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; }
         h1 { margin-bottom: 30px; }
-        h2 { margin-top: 30px; margin-bottom: 15px; font-size: 18px; }
+        h2 { margin-top: 0; margin-bottom: 15px; font-size: 18px; }
         label { display: block; margin-bottom: 5px; font-weight: 500; }
         select, input[type="text"] {
             padding: 8px;
             font-size: 14px;
             border: 1px solid #ccc;
             border-radius: 4px;
-            margin-bottom: 15px;
         }
-        select { min-width: 150px; }
-        input[type="text"] { width: 100%; box-sizing: border-box; }
-        textarea {
-            width: 100%;
-            height: 300px;
-            font-family: monospace;
-            font-size: 13px;
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            box-sizing: border-box;
-        }
-        button {
-            padding: 10px 20px;
-            font-size: 16px;
-            margin-top: 10px;
-            cursor: pointer;
-            background: #3b82f6;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        button:hover { background: #2563eb; }
-        .success { color: green; margin-left: 10px; }
-        .error { color: red; }
+        select { min-width: 100px; }
         .section {
             background: #f9fafb;
             padding: 20px;
             border-radius: 8px;
             margin-bottom: 20px;
         }
-        .help { color: #666; font-size: 13px; margin-top: 5px; }
-        .mapping-help {
-            background: #f0f9ff;
-            padding: 15px;
+        .help { color: #666; font-size: 13px; margin-top: 10px; }
+        .mapping-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        .mapping-type { width: 100px; flex-shrink: 0; }
+        .mapping-match, .mapping-replace { flex: 1; min-width: 200px; }
+        .arrow { color: #666; font-size: 18px; }
+        .remove-btn {
+            background: #ef4444;
+            color: white;
+            border: none;
             border-radius: 4px;
-            margin-bottom: 15px;
-            font-size: 13px;
+            width: 30px;
+            height: 30px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+            padding: 0;
         }
-        .mapping-help code {
-            background: #e0f2fe;
-            padding: 2px 6px;
-            border-radius: 3px;
+        .remove-btn:hover { background: #dc2626; }
+        .add-btn {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
         }
+        .add-btn:hover { background: #059669; }
+        .save-btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+        .save-btn:hover { background: #2563eb; }
+        .success { color: green; margin-left: 10px; }
+        #mappingsContainer { margin-top: 15px; }
+        .example { background: #f0f9ff; padding: 12px; border-radius: 4px; margin-top: 15px; font-size: 13px; }
+        .example code { background: #e0f2fe; padding: 2px 6px; border-radius: 3px; }
     </style>
 </head>
 <body>
     <h1>Embyfin Kiosk Configuration</h1>
 
-    <form method="POST">
+    <form method="POST" id="configForm">
         <div class="section">
             <h2>Player</h2>
             <label for="player">Default Player</label>
             <select name="player" id="player">
-                <option value="mpv">mpv</option>
-                <option value="vlc">VLC</option>
+                <option value="mpv"` + playerMpvSelected + `>mpv</option>
+                <option value="vlc"` + playerVlcSelected + `>VLC</option>
             </select>
-            <p class="help">Player paths and arguments can be customized in the JSON below.</p>
         </div>
 
         <div class="section">
             <h2>Path Mappings</h2>
-            <div class="mapping-help">
-                <strong>Mapping Types:</strong><br>
-                <code>prefix</code> - Simple string prefix replacement<br>
-                <code>wildcard</code> - Use <code>*</code> (single segment) and <code>**</code> (any path), reference with <code>{1}</code>, <code>{2}</code><br>
-                <code>regex</code> - Full regex with <code>$1</code>, <code>$2</code> backreferences
+            <p class="help" style="margin-top: 0;">Transform media paths from your server to Windows-accessible paths.</p>
+
+            <div id="mappingsContainer">` + mappingRows.String() + `
+            </div>
+
+            <button type="button" class="add-btn" onclick="addMapping()">+ Add Mapping</button>
+
+            <div class="example">
+                <strong>Example:</strong> To map <code>nfs://192.168.1.28/mnt/media/Movies</code> to <code>\\server\Movies</code><br>
+                Type: <code>prefix</code>, Match: <code>nfs://192.168.1.28/mnt/media/Movies</code>, Replace: <code>\\server\Movies</code>
             </div>
         </div>
 
-        <div class="section">
-            <h2>Full Configuration (JSON)</h2>
-            <textarea name="config" id="configJson">` + string(configJSON) + `</textarea>
-        </div>
-
-        <button type="submit">Save Configuration</button>
+        <button type="submit" class="save-btn">Save Configuration</button>
         <span class="success" id="savedMsg" style="display: none;">Saved!</span>
     </form>
 
@@ -353,6 +407,31 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
     </p>
 
     <script>
+        let mappingIndex = ` + fmt.Sprintf("%d", len(mappings)) + `;
+
+        function addMapping() {
+            const container = document.getElementById('mappingsContainer');
+            const row = document.createElement('div');
+            row.className = 'mapping-row';
+            row.dataset.index = mappingIndex;
+            row.innerHTML = ` + "`" + `
+                <select name="mapping_type_${mappingIndex}" class="mapping-type">
+                    <option value="prefix" selected>prefix</option>
+                    <option value="regex">regex</option>
+                </select>
+                <input type="text" name="mapping_match_${mappingIndex}" placeholder="Match pattern" class="mapping-match">
+                <span class="arrow">→</span>
+                <input type="text" name="mapping_replace_${mappingIndex}" placeholder="Replace with" class="mapping-replace">
+                <button type="button" class="remove-btn" onclick="removeMapping(this)">×</button>
+            ` + "`" + `;
+            container.appendChild(row);
+            mappingIndex++;
+        }
+
+        function removeMapping(btn) {
+            btn.closest('.mapping-row').remove();
+        }
+
         // Show saved message if redirected with ?saved=1
         if (window.location.search.includes('saved=1')) {
             document.getElementById('savedMsg').style.display = 'inline';
@@ -361,25 +440,6 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
                 history.replaceState(null, '', '/config');
             }, 3000);
         }
-
-        // Sync player dropdown with JSON
-        const playerSelect = document.getElementById('player');
-        const configJson = document.getElementById('configJson');
-
-        try {
-            const cfg = JSON.parse(configJson.value);
-            playerSelect.value = cfg.player || 'mpv';
-        } catch (e) {}
-
-        playerSelect.addEventListener('change', function() {
-            try {
-                const cfg = JSON.parse(configJson.value);
-                cfg.player = this.value;
-                configJson.value = JSON.stringify(cfg, null, 2);
-            } catch (e) {
-                alert('Invalid JSON in configuration');
-            }
-        });
     </script>
 </body>
 </html>`
@@ -390,21 +450,48 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == "POST" {
 		r.ParseForm()
-		newConfigJSON := r.FormValue("config")
 
-		var newConfig Config
-		if err := json.Unmarshal([]byte(newConfigJSON), &newConfig); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
-			return
+		// Get player selection
+		player := r.FormValue("player")
+		if player != "mpv" && player != "vlc" {
+			player = "mpv"
 		}
 
-		// Ensure players map exists
-		if newConfig.Players == nil {
-			newConfig.Players = defaultConfig().Players
+		// Parse path mappings from form
+		var mappings []PathMapping
+		for i := 0; ; i++ {
+			matchKey := fmt.Sprintf("mapping_match_%d", i)
+			replaceKey := fmt.Sprintf("mapping_replace_%d", i)
+			typeKey := fmt.Sprintf("mapping_type_%d", i)
+
+			match := r.FormValue(matchKey)
+			replace := r.FormValue(replaceKey)
+			mappingType := r.FormValue(typeKey)
+
+			// Check if this mapping exists (at least match or replace has a value)
+			if match == "" && replace == "" {
+				// Check if there might be gaps in indices
+				if i > 100 { // Safety limit
+					break
+				}
+				continue
+			}
+
+			if match != "" { // Only add if match pattern is provided
+				if mappingType == "" {
+					mappingType = "prefix"
+				}
+				mappings = append(mappings, PathMapping{
+					Type:    mappingType,
+					Match:   match,
+					Replace: replace,
+				})
+			}
 		}
 
 		configMu.Lock()
-		config = newConfig
+		config.Player = player
+		config.PathMappings = mappings
 		err := saveConfigLocked()
 		configMu.Unlock()
 
@@ -569,10 +656,7 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 		"// Embyfin Kiosk Userscript\n// Generated from extension/content.js",
 		1)
 
-	// Replace hardcoded port with configured port
-	configMu.RLock()
-	port := config.Port
-	configMu.RUnlock()
+	// Replace hardcoded port with configured port (port already read above)
 	script = strings.Replace(script,
 		"const KIOSK_SERVER = 'http://localhost:9999'",
 		fmt.Sprintf("const KIOSK_SERVER = 'http://localhost:%d'", port),
