@@ -1002,6 +1002,65 @@ var (
 	lastDiscovery    []DiscoveredServer
 )
 
+// getBroadcastAddresses returns broadcast addresses for all network interfaces
+func getBroadcastAddresses() []net.IP {
+	var broadcasts []net.IP
+	seen := make(map[string]bool)
+
+	// Always include global broadcast
+	broadcasts = append(broadcasts, net.IPv4bcast)
+	seen["255.255.255.255"] = true
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return broadcasts
+	}
+
+	for _, iface := range interfaces {
+		// Skip loopback and down interfaces
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			ip := ipNet.IP.To4()
+			if ip == nil {
+				continue // Skip IPv6
+			}
+
+			// Calculate broadcast address: IP | ^Mask
+			mask := ipNet.Mask
+			if len(mask) != 4 {
+				continue
+			}
+
+			broadcast := make(net.IP, 4)
+			for i := 0; i < 4; i++ {
+				broadcast[i] = ip[i] | ^mask[i]
+			}
+
+			broadcastStr := broadcast.String()
+			if !seen[broadcastStr] {
+				broadcasts = append(broadcasts, broadcast)
+				seen[broadcastStr] = true
+				log.Printf("Discovery: will try broadcast %s (from %s)", broadcastStr, iface.Name)
+			}
+		}
+	}
+
+	return broadcasts
+}
+
 // runDiscovery performs network discovery and optionally updates config
 func runDiscovery(updateConfig bool) []DiscoveredServer {
 	discoveryMu.Lock()
@@ -1021,6 +1080,10 @@ func runDiscovery(updateConfig bool) []DiscoveredServer {
 	var servers []DiscoveredServer
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	seen := make(map[string]bool) // Track seen server addresses to avoid duplicates
+
+	// Get all broadcast addresses to try
+	broadcasts := getBroadcastAddresses()
 
 	// Discovery messages
 	queries := []struct {
@@ -1047,14 +1110,13 @@ func runDiscovery(updateConfig bool) []DiscoveredServer {
 			// Set read deadline
 			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 
-			// Broadcast address
-			broadcastAddr := &net.UDPAddr{IP: net.IPv4bcast, Port: 7359}
-
-			// Send discovery message
-			_, err = conn.WriteToUDP([]byte(message), broadcastAddr)
-			if err != nil {
-				log.Printf("Discovery: failed to send broadcast: %v", err)
-				return
+			// Send to all broadcast addresses
+			for _, broadcastIP := range broadcasts {
+				broadcastAddr := &net.UDPAddr{IP: broadcastIP, Port: 7359}
+				_, err = conn.WriteToUDP([]byte(message), broadcastAddr)
+				if err != nil {
+					log.Printf("Discovery: failed to send to %s: %v", broadcastIP, err)
+				}
 			}
 
 			// Listen for responses
@@ -1084,16 +1146,20 @@ func runDiscovery(updateConfig bool) []DiscoveredServer {
 					serverURL = fmt.Sprintf("http://%s:8096", addr.IP.String())
 				}
 
+				// Deduplicate by address
 				mu.Lock()
-				servers = append(servers, DiscoveredServer{
-					Name:     response.Name,
-					Address:  addr.IP.String(),
-					URL:      serverURL + "/*",
-					Platform: platform,
-				})
+				key := addr.IP.String() + "|" + platform
+				if !seen[key] {
+					seen[key] = true
+					servers = append(servers, DiscoveredServer{
+						Name:     response.Name,
+						Address:  addr.IP.String(),
+						URL:      serverURL + "/*",
+						Platform: platform,
+					})
+					log.Printf("Discovery: found %s server %q at %s", platform, response.Name, serverURL)
+				}
 				mu.Unlock()
-
-				log.Printf("Discovery: found %s server %q at %s", platform, response.Name, serverURL)
 			}
 		}(q.message, q.platform)
 	}
