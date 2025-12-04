@@ -2,11 +2,13 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -16,9 +18,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Microsoft/go-winio"
 )
 
 //go:embed extension/*
@@ -57,7 +62,232 @@ var (
 	currentPlayer   *exec.Cmd
 	currentPlayerMu sync.Mutex
 	playerItemId    string
+	mpvIPCPath      string  // Named pipe path for mpv IPC
+	lastPosition    float64 // Last known playback position in seconds
+	videoDuration   float64 // Total video duration in seconds
+	// Emby API info for progress reporting
+	embyServerURL string
+	embyUserId    string
+	embyToken     string
 )
+
+// Connect to mpv IPC - uses named pipes on Windows, Unix sockets on Linux
+func connectMpvIPC(pipePath string) (net.Conn, error) {
+	if runtime.GOOS == "windows" {
+		return winio.DialPipe(pipePath, nil)
+	}
+	return net.DialTimeout("unix", pipePath, 500*time.Millisecond)
+}
+
+// Query mpv for a property via IPC
+func queryMpvProperty(pipePath, property string) (interface{}, error) {
+	conn, err := connectMpvIPC(pipePath)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// Set read/write deadline
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+
+	// Send JSON-IPC command
+	cmd := map[string]interface{}{
+		"command": []interface{}{"get_property", property},
+	}
+	cmdBytes, _ := json.Marshal(cmd)
+	cmdBytes = append(cmdBytes, '\n')
+
+	_, err = conn.Write(cmdBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read response line by line (mpv sends newline-delimited JSON)
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return nil, err
+	}
+
+	if data, ok := resp["data"]; ok {
+		return data, nil
+	}
+	return nil, fmt.Errorf("no data in response")
+}
+
+// Query Emby for stored playback position
+func getStoredPosition(serverURL, userId, token, itemId string) float64 {
+	apiURL := fmt.Sprintf("%s/Users/%s/Items/%s", serverURL, userId, itemId)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		log.Printf("getStoredPosition: failed to create request: %v", err)
+		return 0
+	}
+	req.Header.Set("X-Emby-Token", token)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("getStoredPosition: request failed: %v", err)
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		log.Printf("getStoredPosition: server returned %d", resp.StatusCode)
+		return 0
+	}
+
+	var data struct {
+		UserData struct {
+			PlaybackPositionTicks float64 `json:"PlaybackPositionTicks"`
+		} `json:"UserData"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		log.Printf("getStoredPosition: failed to parse response: %v", err)
+		return 0
+	}
+
+	positionSeconds := data.UserData.PlaybackPositionTicks / 10000000.0
+	log.Printf("getStoredPosition: item %s has %.0f ticks = %.1f seconds",
+		itemId, data.UserData.PlaybackPositionTicks, positionSeconds)
+	return positionSeconds
+}
+
+// Report playback start to Emby server (creates a session)
+func reportPlaybackStart() {
+	currentPlayerMu.Lock()
+	itemId := playerItemId
+	serverURL := embyServerURL
+	token := embyToken
+	currentPlayerMu.Unlock()
+
+	if itemId == "" || serverURL == "" || token == "" {
+		log.Printf("Playback start: skipping (no credentials)")
+		return
+	}
+
+	apiURL := fmt.Sprintf("%s/Sessions/Playing", serverURL)
+
+	body := map[string]interface{}{
+		"ItemId":      itemId,
+		"CanSeek":     true,
+		"PlayMethod":  "DirectPlay",
+		"PlaySessionId": fmt.Sprintf("embyfin-kiosk-%d", time.Now().Unix()),
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	log.Printf("Playback start: POST %s with %s", apiURL, string(bodyBytes))
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		log.Printf("Playback start: failed to create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Emby-Token", token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Playback start: request failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyResp, _ := io.ReadAll(resp.Body)
+	log.Printf("Playback start: response %d: %s", resp.StatusCode, string(bodyResp))
+}
+
+// Report playback stopped to Emby server
+func reportPlaybackStopped() {
+	currentPlayerMu.Lock()
+	itemId := playerItemId
+	position := lastPosition
+	serverURL := embyServerURL
+	token := embyToken
+	currentPlayerMu.Unlock()
+
+	if itemId == "" || serverURL == "" || token == "" {
+		log.Printf("Playback stop: skipping (no credentials)")
+		return
+	}
+
+	// Convert seconds to ticks (1 tick = 100 nanoseconds)
+	positionTicks := int64(position * 10000000)
+
+	apiURL := fmt.Sprintf("%s/Sessions/Playing/Stopped", serverURL)
+
+	body := map[string]interface{}{
+		"ItemId":        itemId,
+		"PositionTicks": positionTicks,
+		"PlaySessionId": fmt.Sprintf("embyfin-kiosk-%d", time.Now().Unix()),
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	log.Printf("Playback stop: POST %s with %s", apiURL, string(bodyBytes))
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		log.Printf("Playback stop: failed to create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Emby-Token", token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Playback stop: request failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyResp, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("Playback stop: saved position %.1f seconds (%d ticks) for item %s. Response: %s",
+			position, positionTicks, itemId, string(bodyResp))
+	} else {
+		log.Printf("Playback stop: server returned %d: %s", resp.StatusCode, string(bodyResp))
+	}
+}
+
+// Get current playback position from mpv
+func getMpvPlaybackInfo() (position, duration float64, err error) {
+	currentPlayerMu.Lock()
+	pipePath := mpvIPCPath
+	currentPlayerMu.Unlock()
+
+	if pipePath == "" {
+		return 0, 0, fmt.Errorf("no IPC path")
+	}
+
+	pos, err := queryMpvProperty(pipePath, "time-pos")
+	if err != nil {
+		return lastPosition, videoDuration, nil // Return cached values on error
+	}
+	if p, ok := pos.(float64); ok {
+		position = p
+		lastPosition = p
+	}
+
+	dur, err := queryMpvProperty(pipePath, "duration")
+	if err != nil {
+		return position, videoDuration, nil
+	}
+	if d, ok := dur.(float64); ok {
+		duration = d
+		videoDuration = d
+	}
+
+	return position, duration, nil
+}
 
 func defaultConfig() Config {
 	return Config{
@@ -233,6 +463,19 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemId := r.URL.Query().Get("itemId")
+	serverURL := r.URL.Query().Get("serverUrl")
+	userId := r.URL.Query().Get("userId")
+	token := r.URL.Query().Get("token")
+	resumeFlag := r.URL.Query().Get("resume")
+
+	// Only query for resume position if resume=1
+	var startSeconds float64
+	if resumeFlag == "1" && serverURL != "" && userId != "" && token != "" && itemId != "" {
+		if storedPosition := getStoredPosition(serverURL, userId, token, itemId); storedPosition > 0 {
+			startSeconds = storedPosition
+			log.Printf("Resume position from Emby: %.1f seconds", startSeconds)
+		}
+	}
 
 	translatedPath := translatePath(path)
 	log.Printf("Playing: %s -> %s", path, translatedPath)
@@ -268,6 +511,24 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args := append([]string{}, playerConfig.Args...)
+
+	// Add IPC socket for mpv to get playback position
+	var ipcPath string
+	if playerKey == "mpv" {
+		if runtime.GOOS == "windows" {
+			ipcPath = `\\.\pipe\embyfin-kiosk-mpv`
+		} else {
+			ipcPath = "/tmp/embyfin-kiosk-mpv.sock"
+		}
+		args = append(args, "--input-ipc-server="+ipcPath)
+
+		// Add resume position if provided
+		if startSeconds > 0 {
+			args = append(args, fmt.Sprintf("--start=%.1f", startSeconds))
+			log.Printf("Starting playback at %.1f seconds", startSeconds)
+		}
+	}
+
 	args = append(args, pathForPlayer)
 
 	// Log the exact command line
@@ -292,15 +553,39 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	currentPlayerMu.Lock()
 	currentPlayer = cmd
 	playerItemId = itemId
+	mpvIPCPath = ipcPath
+	lastPosition = 0
+	videoDuration = 0
+	embyServerURL = serverURL
+	embyUserId = userId
+	embyToken = token
 	currentPlayerMu.Unlock()
+
+	log.Printf("Stored Emby info: server=%s, userId=%s, hasToken=%v", serverURL, userId, token != "")
+
+	// Report playback started to Emby
+	go reportPlaybackStart()
 
 	// Wait for the player to finish in background
 	go func() {
 		cmd.Wait()
+
+		// Get final position before clearing state
+		if mpvIPCPath != "" {
+			getMpvPlaybackInfo() // Updates lastPosition
+		}
+
+		// Report playback stopped to Emby
+		reportPlaybackStopped()
+
 		currentPlayerMu.Lock()
 		if currentPlayer == cmd {
 			currentPlayer = nil
 			playerItemId = ""
+			mpvIPCPath = ""
+			embyServerURL = ""
+			embyUserId = ""
+			embyToken = ""
 		}
 		currentPlayerMu.Unlock()
 		log.Printf("Player exited")
@@ -353,10 +638,17 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	playing := cmd != nil
 
+	var position, duration float64
+	if playing {
+		position, duration, _ = getMpvPlaybackInfo()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"playing": playing,
-		"itemId":  itemId,
+		"playing":  playing,
+		"itemId":   itemId,
+		"position": position,
+		"duration": duration,
 	})
 }
 
@@ -1537,11 +1829,41 @@ func resetDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Get default log file path (temp directory)
+func getDefaultLogPath() string {
+	var tempDir string
+	if runtime.GOOS == "windows" {
+		tempDir = os.Getenv("TEMP")
+		if tempDir == "" {
+			tempDir = os.Getenv("TMP")
+		}
+		if tempDir == "" {
+			tempDir = "C:\\Windows\\Temp"
+		}
+	} else {
+		tempDir = "/tmp"
+	}
+	return filepath.Join(tempDir, "embyfin-kiosk.log")
+}
+
+
 func main() {
 	// Parse command-line flags
 	var portFlag int
 	flag.IntVar(&portFlag, "port", 0, "Port to listen on (overrides config)")
 	flag.Parse()
+
+	// Set up automatic file logging (truncate on startup)
+	logPath := getDefaultLogPath()
+	logFile, err := os.OpenFile(logPath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Warning: could not open log file %s: %v", logPath, err)
+	} else {
+		defer logFile.Close()
+		// Log to both file and stderr
+		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		log.Printf("Logging to %s", logPath)
+	}
 
 	// Determine config path (same directory as executable)
 	exe, err := os.Executable()

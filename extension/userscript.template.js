@@ -20,6 +20,9 @@
     let modalElement = null;
     let statusElement = null;
     let pollInterval = null;
+    let currentItemId = null;
+    let lastKnownPosition = 0;
+    let lastKnownDuration = 0;
 
     // Create and show the modal overlay
     function showModal(message) {
@@ -164,12 +167,30 @@
                         try {
                             const status = JSON.parse(response.responseText);
                             if (!status.playing) {
-                                // Playback ended
+                                // Playback ended - server reports progress to Emby
                                 hideModal();
-                            } else if (status.position !== undefined) {
-                                const mins = Math.floor(status.position / 60);
-                                const secs = Math.floor(status.position % 60);
-                                updateModalStatus(`Playing... ${mins}:${secs.toString().padStart(2, '0')}`);
+                            } else {
+                                // Track position for progress reporting
+                                if (status.position !== undefined) {
+                                    lastKnownPosition = status.position;
+                                }
+                                if (status.duration !== undefined) {
+                                    lastKnownDuration = status.duration;
+                                }
+
+                                if (status.position !== undefined && status.duration !== undefined) {
+                                    const posMin = Math.floor(status.position / 60);
+                                    const posSec = Math.floor(status.position % 60);
+                                    const durMin = Math.floor(status.duration / 60);
+                                    const durSec = Math.floor(status.duration % 60);
+                                    const posStr = `${posMin}:${posSec.toString().padStart(2, '0')}`;
+                                    const durStr = `${durMin}:${durSec.toString().padStart(2, '0')}`;
+                                    updateModalStatus(`Playing... ${posStr} / ${durStr}`);
+                                } else if (status.position !== undefined) {
+                                    const mins = Math.floor(status.position / 60);
+                                    const secs = Math.floor(status.position % 60);
+                                    updateModalStatus(`Playing... ${mins}:${secs.toString().padStart(2, '0')}`);
+                                }
                             }
                         } catch (e) {
                             console.error('Embyfin Kiosk: Error parsing status', e);
@@ -190,12 +211,28 @@
     }
 
     // Send play request to local kiosk server
-    function playInExternalPlayer(path, itemId) {
+    function playInExternalPlayer(path, itemId, isResume) {
+        // Track item for progress reporting
+        currentItemId = itemId;
+        lastKnownPosition = 0;
+        lastKnownDuration = 0;
+
         // Show modal immediately
         showModal('Launching player...');
 
-        const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path) +
-                    (itemId ? '&itemId=' + encodeURIComponent(itemId) : '');
+        // Get Emby credentials for progress reporting
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const apiBase = getApiBase();
+        const serverUrl = window.location.origin + apiBase;
+        const userId = win.ApiClient && win.ApiClient.getCurrentUserId ? win.ApiClient.getCurrentUserId() : '';
+        const token = win.ApiClient && win.ApiClient.accessToken ? win.ApiClient.accessToken() : '';
+
+        let url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
+        if (itemId) url += '&itemId=' + encodeURIComponent(itemId);
+        if (serverUrl) url += '&serverUrl=' + encodeURIComponent(serverUrl);
+        if (userId) url += '&userId=' + encodeURIComponent(userId);
+        if (token) url += '&token=' + encodeURIComponent(token);
+        if (isResume) url += '&resume=1';
         const opts = {
             method: 'GET',
             url: url,
@@ -375,7 +412,7 @@
     }
 
     // Handle play button click
-    async function handlePlayClick(event) {
+    async function handlePlayClick(event, isResume) {
         let itemId = extractItemId(event.target);
 
         if (!itemId) {
@@ -397,8 +434,8 @@
         try {
             const path = await getItemPath(itemId);
             if (path) {
-                console.log('Embyfin Kiosk: Playing', path);
-                playInExternalPlayer(path, itemId);
+                console.log('Embyfin Kiosk: Playing', path, 'isResume:', isResume);
+                playInExternalPlayer(path, itemId, isResume);
             }
         } catch (err) {
             console.error('Embyfin Kiosk: Error getting item path', err);
@@ -407,19 +444,24 @@
 
     // Add click listeners to play buttons
     function attachPlayListeners() {
+        const resumeSelectors = [
+            '[data-action="resume"]',
+            '.btnResume'
+        ];
         const playSelectors = [
             '.btnPlay',
             '.playButton',
             'button[data-action="play"]',
             '.detailButton-primary',
-            '[data-action="resume"]',
-            '.btnResume'
+            ...resumeSelectors
         ];
 
         document.addEventListener('click', function(event) {
             const target = event.target.closest(playSelectors.join(','));
             if (target) {
-                handlePlayClick(event);
+                // btnResume -> resume, btnPlay -> play from beginning
+                const isResume = event.target.closest(resumeSelectors.join(',')) !== null;
+                handlePlayClick(event, isResume);
             }
         }, true);
     }
@@ -480,8 +522,19 @@
                     }
 
                     if (itemId) {
+                        // Check for resume position - if startPositionTicks > 0, it's a resume
+                        let startPositionTicks = 0;
+                        let isResume = false;
+                        if (options && options.startPositionTicks && options.startPositionTicks > 0) {
+                            startPositionTicks = options.startPositionTicks;
+                            isResume = true;
+                        }
+                        console.log('Embyfin Kiosk: startPositionTicks =', startPositionTicks, 'isResume =', isResume);
+
                         // Dispatch event for userscript to handle
-                        const event = new CustomEvent('embyfin-kiosk-play', { detail: { itemId: itemId } });
+                        const event = new CustomEvent('embyfin-kiosk-play', {
+                            detail: { itemId: itemId, startPositionTicks: startPositionTicks, isResume: isResume }
+                        });
                         document.dispatchEvent(event);
                         return; // Don't call original play
                     }
@@ -542,12 +595,14 @@
         // Listen for play events from injected script
         document.addEventListener('embyfin-kiosk-play', async function(e) {
             const itemId = e.detail.itemId;
-            console.log('Embyfin Kiosk: Received play event for', itemId);
+            const startPositionTicks = e.detail.startPositionTicks || 0;
+            const isResume = e.detail.isResume || false;
+            console.log('Embyfin Kiosk: Received play event for', itemId, 'startPositionTicks:', startPositionTicks, 'isResume:', isResume);
             try {
                 const path = await getItemPath(itemId);
                 if (path) {
                     console.log('Embyfin Kiosk: Playing externally', path);
-                    playInExternalPlayer(path, itemId);
+                    playInExternalPlayer(path, itemId, isResume);
                 }
             } catch (err) {
                 console.error('Embyfin Kiosk: Error getting path', err);
