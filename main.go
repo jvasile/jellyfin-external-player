@@ -764,112 +764,54 @@ func extensionDownloadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func userscriptHandler(w http.ResponseWriter, r *http.Request) {
-	// Read content.js from embedded FS
-	contentJS, err := extensionFS.ReadFile("extension/content.js")
+	// Try to read template from disk first (allows editing without restart during development)
+	// Fall back to embedded version if not found
+	templateBytes, err := os.ReadFile("extension/userscript.template.js")
 	if err != nil {
-		http.Error(w, "Failed to read content.js", http.StatusInternalServerError)
-		return
+		// Try relative to executable
+		if exePath, err2 := os.Executable(); err2 == nil {
+			exeDir := filepath.Dir(exePath)
+			templateBytes, err = os.ReadFile(filepath.Join(exeDir, "extension", "userscript.template.js"))
+		}
+	}
+	if err != nil {
+		// Fall back to embedded version
+		templateBytes, err = extensionFS.ReadFile("extension/userscript.template.js")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to read userscript.template.js: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
-	// Build @match directives from config
+	// Build @include directives from config
 	configMu.RLock()
 	serverURLs := config.ServerURLs
-	configMu.RUnlock()
-
-	configMu.RLock()
 	port := config.Port
 	configMu.RUnlock()
 
 	var includeLines strings.Builder
 	// Always include the kiosk server pages for detection
-	includeLines.WriteString(fmt.Sprintf("// @include      http://localhost:%d/*\n", port))
-	includeLines.WriteString(fmt.Sprintf("// @include      http://127.0.0.1:%d/*\n", port))
+	includeLines.WriteString(fmt.Sprintf("@include      http://localhost:%d/*\n// ", port))
+	includeLines.WriteString(fmt.Sprintf("@include      http://127.0.0.1:%d/*\n// ", port))
 	if len(serverURLs) == 0 {
 		// Fallback if no servers configured
-		includeLines.WriteString("// @include      *://*/*\n")
+		includeLines.WriteString("@include      *://*/*")
 	} else {
-		for _, url := range serverURLs {
-			includeLines.WriteString(fmt.Sprintf("// @include      %s\n", url))
+		for i, url := range serverURLs {
+			includeLines.WriteString(fmt.Sprintf("@include      %s", url))
+			if i < len(serverURLs)-1 {
+				includeLines.WriteString("\n// ")
+			}
 		}
 	}
 
-	// Userscript header
-	header := fmt.Sprintf(`// ==UserScript==
-// @name         Embyfin Kiosk
-// @namespace    https://github.com/jvasile/embyfin-kiosk
-// @version      1.0.0
-// @description  Play Emby/Jellyfin videos in external player (mpv/VLC) via local server
-%s// @grant        GM_xmlhttpRequest
-// @grant        GM.xmlHttpRequest
-// @grant        unsafeWindow
-// @connect      localhost
-// @connect      127.0.0.1
-// ==/UserScript==
-
-`, includeLines.String())
-
-	// Replace the play function - support both GM_xmlhttpRequest and GM.xmlHttpRequest
-	gmFunction := `    // ==PLAY_FUNCTION_START==
-    // Send play request to local kiosk server
-    function playInExternalPlayer(path) {
-        const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
-        const opts = {
-            method: 'GET',
-            url: url,
-            onload: function(response) {
-                if (response.status === 200) {
-                    console.log('Embyfin Kiosk: Playing in external player');
-                } else {
-                    console.error('Embyfin Kiosk: Server error', response.status);
-                    alert('Embyfin Kiosk: Server returned error ' + response.status);
-                }
-            },
-            onerror: function(error) {
-                console.error('Embyfin Kiosk: Failed to connect', error);
-                alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
-            }
-        };
-        // Support both Greasemonkey 4+ (GM.xmlHttpRequest) and older/Tampermonkey (GM_xmlhttpRequest)
-        if (typeof GM !== 'undefined' && GM.xmlHttpRequest) {
-            GM.xmlHttpRequest(opts);
-        } else if (typeof GM_xmlhttpRequest !== 'undefined') {
-            GM_xmlhttpRequest(opts);
-        } else {
-            console.error('Embyfin Kiosk: No GM_xmlhttpRequest available');
-            alert('Embyfin Kiosk: Userscript manager not supported');
-        }
-    }
-    // ==PLAY_FUNCTION_END==`
-
-	// Replace the chrome.runtime.sendMessage version with fetch version
-	script := string(contentJS)
-
-	// Find and replace the function between markers
-	startMarker := "    // ==PLAY_FUNCTION_START=="
-	endMarker := "    // ==PLAY_FUNCTION_END=="
-
-	startIdx := strings.Index(script, startMarker)
-	endIdx := strings.Index(script, endMarker)
-
-	if startIdx != -1 && endIdx != -1 {
-		endIdx += len(endMarker)
-		script = script[:startIdx] + gmFunction + script[endIdx:]
-	}
-
-	// Remove the extension-specific comment
-	script = strings.Replace(script,
-		"// Content script injected into Emby/Jellyfin pages\n// This file is shared between the browser extension and userscript",
-		"// Embyfin Kiosk Userscript\n// Generated from extension/content.js",
-		1)
-
-	// Replace hardcoded port with configured port (port already read above)
-	script = strings.Replace(script,
-		"const KIOSK_SERVER = 'http://localhost:9999'",
-		fmt.Sprintf("const KIOSK_SERVER = 'http://localhost:%d'", port),
-		1)
+	// Replace placeholders in template
+	script := string(templateBytes)
+	script = strings.Replace(script, "{{INCLUDE_LINES}}", includeLines.String(), 1)
+	script = strings.Replace(script, "{{PORT}}", fmt.Sprintf("%d", port), 1)
 
 	w.Header().Set("Content-Type", "application/javascript")
-	w.Write([]byte(header + script))
+	w.Write([]byte(script))
 }
 
 func installPageHandler(w http.ResponseWriter, r *http.Request) {

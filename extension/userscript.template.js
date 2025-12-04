@@ -1,27 +1,50 @@
-// Content script injected into Emby/Jellyfin pages
-// This file is shared between the browser extension and userscript
+// ==UserScript==
+// @name         Embyfin Kiosk
+// @namespace    https://github.com/jvasile/embyfin-kiosk
+// @version      1.0.0
+// @description  Play Emby/Jellyfin videos in external player (mpv/VLC) via local server
+// {{INCLUDE_LINES}}
+// @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
+// @grant        unsafeWindow
+// @connect      localhost
+// @connect      127.0.0.1
+// ==/UserScript==
 
 (function() {
     'use strict';
 
-    const KIOSK_SERVER = 'http://localhost:9999';
+    const KIOSK_SERVER = 'http://localhost:{{PORT}}';
 
-    // ==PLAY_FUNCTION_START==
-    // Send play request to local kiosk server via background script
+    // Send play request to local kiosk server
     function playInExternalPlayer(path) {
-        chrome.runtime.sendMessage({
-            action: 'play',
-            path: path
-        }, function(response) {
-            if (response && response.success) {
-                console.log('Embyfin Kiosk: Playing in external player');
-            } else {
-                console.error('Embyfin Kiosk: Failed to play', response);
+        const url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
+        const opts = {
+            method: 'GET',
+            url: url,
+            onload: function(response) {
+                if (response.status === 200) {
+                    console.log('Embyfin Kiosk: Playing in external player');
+                } else {
+                    console.error('Embyfin Kiosk: Server error', response.status);
+                    alert('Embyfin Kiosk: Server returned error ' + response.status);
+                }
+            },
+            onerror: function(error) {
+                console.error('Embyfin Kiosk: Failed to connect', error);
                 alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
             }
-        });
+        };
+        // Support both Greasemonkey 4+ (GM.xmlHttpRequest) and older/Tampermonkey (GM_xmlhttpRequest)
+        if (typeof GM !== 'undefined' && GM.xmlHttpRequest) {
+            GM.xmlHttpRequest(opts);
+        } else if (typeof GM_xmlhttpRequest !== 'undefined') {
+            GM_xmlhttpRequest(opts);
+        } else {
+            console.error('Embyfin Kiosk: No GM_xmlhttpRequest available');
+            alert('Embyfin Kiosk: Userscript manager not supported');
+        }
     }
-    // ==PLAY_FUNCTION_END==
 
     // Check if this looks like an Emby/Jellyfin page
     function isEmbyfinPage() {
@@ -59,27 +82,6 @@
         return platform === 'jellyfin' ? '' : '/emby';
     }
 
-    // Get authentication params
-    function getAuthParams() {
-        // Check both window and unsafeWindow (for userscript sandboxing)
-        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-        const params = [];
-        if (win.ApiClient) {
-            const token = win.ApiClient.accessToken ? win.ApiClient.accessToken() : null;
-            if (token) {
-                params.push(`api_key=${encodeURIComponent(token)}`);
-            } else if (win.ApiClient._serverInfo && win.ApiClient._serverInfo.AccessToken) {
-                params.push(`api_key=${encodeURIComponent(win.ApiClient._serverInfo.AccessToken)}`);
-            }
-            // Add UserId if available
-            const userId = win.ApiClient.getCurrentUserId ? win.ApiClient.getCurrentUserId() : null;
-            if (userId) {
-                params.push(`UserId=${encodeURIComponent(userId)}`);
-            }
-        }
-        return params.join('&');
-    }
-
     // Fetch item details from API
     async function getItemPath(itemId) {
         const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -115,8 +117,8 @@
             return parent.dataset.id;
         }
 
-        // Look for card container (common in Emby/Jellyfin)
-        const card = element.closest('.card, .cardBox, .itemAction');
+        // Look for the outer .card container (contains the image with item ID)
+        const card = element.closest('.card');
         if (card) {
             // Check various attributes Emby uses
             if (card.dataset.id) return card.dataset.id;
@@ -131,11 +133,10 @@
 
             // Extract from image URL (e.g., /Items/62257/Images/Primary)
             const img = card.querySelector('img[src*="/Items/"]');
-            console.log('Embyfin Kiosk: Looking for img in card, found:', img);
             if (img) {
                 const imgMatch = img.src.match(/\/Items\/(\d+)\//);
-                console.log('Embyfin Kiosk: img src match:', imgMatch);
                 if (imgMatch) {
+                    console.log('Embyfin Kiosk: Extracted item ID from image URL:', imgMatch[1]);
                     return imgMatch[1];
                 }
             }
@@ -161,7 +162,7 @@
             }
         }
 
-        // Log what we're looking at for debugging - walk up the tree
+        // Log what we're looking at for debugging
         console.log('Embyfin Kiosk: Could not extract ID from element:', element, 'classes:', element.className);
 
         // Look for card and check for links or JS data inside
@@ -171,11 +172,6 @@
             const link = debugCard.querySelector('a[href*="id="]');
             if (link) {
                 console.log('Embyfin Kiosk: Found link in card:', link.href);
-            }
-            // Check for any element with item data
-            const withData = debugCard.querySelector('[data-id], [data-itemid], [data-serveritemid]');
-            if (withData) {
-                console.log('Embyfin Kiosk: Found data element:', withData, withData.dataset);
             }
             // Check card's own properties
             console.log('Embyfin Kiosk: Card dataset:', debugCard.dataset);
@@ -275,7 +271,6 @@
     // Signal presence to kiosk pages
     function signalPresence() {
         if (isKioskPage()) {
-            // Set a flag that the page can detect
             window.embyfinKioskInstalled = true;
             document.dispatchEvent(new CustomEvent('embyfin-kiosk-installed'));
         }
