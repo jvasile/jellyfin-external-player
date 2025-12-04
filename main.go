@@ -1177,6 +1177,32 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(script))
 }
 
+// Serve the main JavaScript file (loaded by the userscript stub)
+func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/javascript")
+
+	// Try to read from disk first (allows editing without restart during development)
+	scriptBytes, err := os.ReadFile("extension/embyfin-kiosk.js")
+	if err != nil {
+		// Try relative to executable
+		if exePath, err2 := os.Executable(); err2 == nil {
+			exeDir := filepath.Dir(exePath)
+			scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "extension", "embyfin-kiosk.js"))
+		}
+	}
+	if err != nil {
+		// Fall back to embedded version
+		scriptBytes, err = extensionFS.ReadFile("extension/embyfin-kiosk.js")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to read embyfin-kiosk.js: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.Write(scriptBytes)
+}
+
 func installPageHandler(w http.ResponseWriter, r *http.Request) {
 	// Handle POST to save server URLs
 	if r.Method == "POST" {
@@ -1806,6 +1832,36 @@ func discoverHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func restartHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	log.Printf("Restart requested, exiting with code 0...")
+	json.NewEncoder(w).Encode(map[string]string{"status": "restarting"})
+
+	// Exit with code 0 after a short delay to allow response to be sent
+	// Use: while ./embyfin-kiosk.exe; do :; done
+	// Ctrl+C will exit with non-zero, stopping the loop
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		os.Exit(0)
+	}()
+}
+
+func shutdownHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	log.Printf("Shutdown requested, exiting with code 1...")
+	json.NewEncoder(w).Encode(map[string]string{"status": "shutdown"})
+
+	// Exit with code 1 to stop the restart loop
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		os.Exit(1)
+	}()
+}
+
 func resetDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -1901,6 +1957,9 @@ func main() {
 	http.HandleFunc("/install/userscript", installUserscriptHandler)
 	http.HandleFunc("/extension.zip", extensionDownloadHandler)
 	http.HandleFunc("/embyfin-kiosk.user.js", userscriptHandler)
+	http.HandleFunc("/embyfin-kiosk.js", mainScriptHandler)
+	http.HandleFunc("/api/restart", restartHandler)
+	http.HandleFunc("/api/shutdown", shutdownHandler)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", config.Port)
 	log.Printf("Starting server on %s", addr)
