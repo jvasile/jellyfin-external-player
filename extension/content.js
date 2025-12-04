@@ -1,0 +1,206 @@
+// Content script injected into Emby/Jellyfin pages
+
+(function() {
+    'use strict';
+
+    const KIOSK_SERVER = 'http://localhost:9999';
+
+    // Check if this looks like an Emby/Jellyfin page
+    function isEmbyfinPage() {
+        return document.querySelector('.skinHeader') !== null ||
+               document.querySelector('#indexPage') !== null ||
+               window.location.pathname.includes('/web/') ||
+               typeof window.ApiClient !== 'undefined';
+    }
+
+    // Detect which platform we're on
+    function detectPlatform() {
+        if (window.ApiClient && window.ApiClient.serverInfo) {
+            const serverInfo = window.ApiClient.serverInfo();
+            if (serverInfo && serverInfo.ServerName) {
+                if (serverInfo.ServerName.toLowerCase().includes('jellyfin')) {
+                    return 'jellyfin';
+                }
+            }
+        }
+        if (document.querySelector('meta[name="application-name"][content*="Jellyfin"]')) {
+            return 'jellyfin';
+        }
+        if (document.querySelector('meta[name="application-name"][content*="Emby"]')) {
+            return 'emby';
+        }
+        if (window.location.hostname.includes('jellyfin')) {
+            return 'jellyfin';
+        }
+        return 'emby';
+    }
+
+    // Get the API base path
+    function getApiBase() {
+        const platform = detectPlatform();
+        return platform === 'jellyfin' ? '' : '/emby';
+    }
+
+    // Get authentication params
+    function getAuthParams() {
+        if (window.ApiClient) {
+            const token = window.ApiClient.accessToken();
+            if (token) {
+                return `api_key=${encodeURIComponent(token)}`;
+            }
+        }
+        return '';
+    }
+
+    // Fetch item details from API
+    async function getItemPath(itemId) {
+        const apiBase = getApiBase();
+        const authParams = getAuthParams();
+        const url = `${window.location.origin}${apiBase}/Items/${itemId}?${authParams}`;
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.Path;
+    }
+
+    // Send play request to local kiosk server via background script
+    function playInExternalPlayer(path) {
+        chrome.runtime.sendMessage({
+            action: 'play',
+            path: path
+        }, function(response) {
+            if (response && response.success) {
+                console.log('Embyfin Kiosk: Playing in external player');
+            } else {
+                console.error('Embyfin Kiosk: Failed to play', response);
+                alert('Embyfin Kiosk: Could not connect to local server. Is embyfin-kiosk.exe running?');
+            }
+        });
+    }
+
+    // Extract item ID from URL or element
+    function extractItemId(element) {
+        if (element.dataset && element.dataset.id) {
+            return element.dataset.id;
+        }
+
+        let parent = element.closest('[data-id]');
+        if (parent && parent.dataset.id) {
+            return parent.dataset.id;
+        }
+
+        const urlMatch = window.location.hash.match(/id=([a-f0-9]+)/i);
+        if (urlMatch) {
+            return urlMatch[1];
+        }
+
+        if (element.href) {
+            const hrefMatch = element.href.match(/id=([a-f0-9]+)/i);
+            if (hrefMatch) {
+                return hrefMatch[1];
+            }
+        }
+
+        return null;
+    }
+
+    // Check if this is a playable item
+    function isPlayableItem() {
+        const hash = window.location.hash;
+        return hash.includes('/movie') ||
+               hash.includes('/episode') ||
+               hash.includes('/video') ||
+               hash.includes('type=Movie') ||
+               hash.includes('type=Episode');
+    }
+
+    // Handle play button click
+    async function handlePlayClick(event) {
+        let itemId = extractItemId(event.target);
+
+        if (!itemId) {
+            const urlMatch = window.location.hash.match(/id=([a-f0-9]+)/i);
+            if (urlMatch) {
+                itemId = urlMatch[1];
+            }
+        }
+
+        if (!itemId) {
+            console.log('Embyfin Kiosk: Could not find item ID');
+            return;
+        }
+
+        try {
+            const path = await getItemPath(itemId);
+            if (path) {
+                event.preventDefault();
+                event.stopPropagation();
+                console.log('Embyfin Kiosk: Playing', path);
+                playInExternalPlayer(path);
+            }
+        } catch (err) {
+            console.error('Embyfin Kiosk: Error getting item path', err);
+        }
+    }
+
+    // Add click listeners to play buttons
+    function attachPlayListeners() {
+        const playSelectors = [
+            '.btnPlay',
+            '.playButton',
+            'button[data-action="play"]',
+            '.detailButton-primary',
+            '[data-action="resume"]',
+            '.btnResume'
+        ];
+
+        document.addEventListener('click', function(event) {
+            const target = event.target.closest(playSelectors.join(','));
+            if (target) {
+                handlePlayClick(event);
+            }
+        }, true);
+    }
+
+    // Keyboard shortcut: Press 'k' to play current item
+    function attachKeyboardShortcut() {
+        document.addEventListener('keydown', async function(event) {
+            if (event.key === 'k' && !event.target.matches('input, textarea')) {
+                const urlMatch = window.location.hash.match(/id=([a-f0-9]+)/i);
+                if (urlMatch && isPlayableItem()) {
+                    try {
+                        const path = await getItemPath(urlMatch[1]);
+                        if (path) {
+                            console.log('Embyfin Kiosk: Playing via keyboard shortcut', path);
+                            playInExternalPlayer(path);
+                        }
+                    } catch (err) {
+                        console.error('Embyfin Kiosk: Error', err);
+                    }
+                }
+            }
+        });
+    }
+
+    // Initialize
+    function init() {
+        if (!isEmbyfinPage()) {
+            return;
+        }
+        console.log('Embyfin Kiosk: Initializing, platform:', detectPlatform());
+        attachPlayListeners();
+        attachKeyboardShortcut();
+    }
+
+    // Wait for page to be ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        // Delay slightly to ensure Emby/Jellyfin JS has loaded
+        setTimeout(init, 1000);
+    }
+})();
