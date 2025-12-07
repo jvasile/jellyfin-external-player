@@ -64,7 +64,8 @@ var (
 	currentPlayer   *exec.Cmd
 	currentPlayerMu sync.Mutex
 	playerItemId    string
-	mpvIPCPath      string  // Named pipe path for mpv IPC
+	playerIPCPath   string  // IPC path (named pipe for mpv, host:port for vlc)
+	currentPlayerType string // "mpv" or "vlc"
 	lastPosition    float64 // Last known playback position in seconds
 	videoDuration   float64 // Total video duration in seconds
 	// Playlist tracking
@@ -147,6 +148,97 @@ func sendMpvCommand(pipePath, command string) error {
 
 	_, err = conn.Write(cmdBytes)
 	return err
+}
+
+// VLC RC interface functions (uses TCP socket with text commands)
+
+const vlcRCPort = 9999 // Port for VLC RC interface
+
+func getVlcRCAddress() string {
+	return fmt.Sprintf("localhost:%d", vlcRCPort)
+}
+
+// Connect to VLC RC interface via TCP
+func connectVlcRC(address string) (net.Conn, error) {
+	return net.DialTimeout("tcp", address, 500*time.Millisecond)
+}
+
+// Send a command to VLC and get response
+func queryVlcRC(address, command string) (string, error) {
+	conn, err := connectVlcRC(address)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+
+	// Send command with newline
+	_, err = conn.Write([]byte(command + "\n"))
+	if err != nil {
+		return "", err
+	}
+
+	// Read response (VLC sends text responses)
+	reader := bufio.NewReader(conn)
+	var response strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break // EOF or timeout, we have what we need
+		}
+		response.WriteString(line)
+		// VLC RC responses end with "> " prompt, but for simple queries we just read one line
+		if strings.HasPrefix(line, "> ") || !strings.HasSuffix(line, "\n") {
+			break
+		}
+	}
+	return strings.TrimSpace(response.String()), nil
+}
+
+// Send a command to VLC without waiting for response
+func sendVlcCommand(address, command string) error {
+	conn, err := connectVlcRC(address)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	_, err = conn.Write([]byte(command + "\n"))
+	return err
+}
+
+// Get VLC playback time in seconds
+func getVlcTime(address string) (float64, error) {
+	resp, err := queryVlcRC(address, "get_time")
+	if err != nil {
+		return 0, err
+	}
+	// Response is just the number of seconds
+	resp = strings.TrimSpace(resp)
+	// Remove any prompt characters
+	resp = strings.TrimPrefix(resp, "> ")
+	seconds, err := strconv.ParseFloat(resp, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse time %q: %v", resp, err)
+	}
+	return seconds, nil
+}
+
+// Get VLC media length in seconds
+func getVlcLength(address string) (float64, error) {
+	resp, err := queryVlcRC(address, "get_length")
+	if err != nil {
+		return 0, err
+	}
+	resp = strings.TrimSpace(resp)
+	resp = strings.TrimPrefix(resp, "> ")
+	seconds, err := strconv.ParseFloat(resp, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse length %q: %v", resp, err)
+	}
+	return seconds, nil
 }
 
 // Query Emby for stored playback position
@@ -287,29 +379,29 @@ func reportPlaybackStopped() {
 	}
 }
 
-// Get current playback position from mpv
-type MpvStatus struct {
+// Get current playback position from player
+type PlayerStatus struct {
 	Playing  bool
 	Paused   bool
 	Position float64
 	Duration float64
 }
 
-func getMpvPlaybackInfo() (MpvStatus, error) {
+func getMpvPlaybackInfo() (PlayerStatus, error) {
 	currentPlayerMu.Lock()
-	pipePath := mpvIPCPath
+	pipePath := playerIPCPath
 	currentPlayerMu.Unlock()
 
 	if pipePath == "" {
-		return MpvStatus{}, fmt.Errorf("no IPC path")
+		return PlayerStatus{}, fmt.Errorf("no IPC path")
 	}
 
-	var status MpvStatus
+	var status PlayerStatus
 
 	// If we can query mpv, it's running
 	pos, err := queryMpvProperty(pipePath, "time-pos")
 	if err != nil {
-		return MpvStatus{}, err // Can't reach mpv
+		return PlayerStatus{}, err // Can't reach mpv
 	}
 	status.Playing = true
 
@@ -328,6 +420,34 @@ func getMpvPlaybackInfo() (MpvStatus, error) {
 	if p, ok := paused.(bool); ok {
 		status.Paused = p
 	}
+
+	return status, nil
+}
+
+func getVlcPlaybackInfo() (PlayerStatus, error) {
+	currentPlayerMu.Lock()
+	address := playerIPCPath
+	currentPlayerMu.Unlock()
+
+	if address == "" {
+		return PlayerStatus{}, fmt.Errorf("no IPC address")
+	}
+
+	var status PlayerStatus
+
+	// Get current position
+	pos, err := getVlcTime(address)
+	if err != nil {
+		return PlayerStatus{}, err // Can't reach VLC
+	}
+	status.Playing = true
+	status.Position = pos
+	lastPosition = pos
+
+	// Get duration
+	dur, _ := getVlcLength(address)
+	status.Duration = dur
+	videoDuration = dur
 
 	return status, nil
 }
@@ -555,7 +675,7 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 
 	args := append([]string{}, playerConfig.Args...)
 
-	// Add IPC socket for mpv to get playback position
+	// Add IPC/RC interface args based on player type
 	var ipcPath string
 	if playerKey == "mpv" {
 		ipcPath = getMpvIPCPath()
@@ -564,6 +684,16 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		// Add resume position if provided
 		if startSeconds > 0 {
 			args = append(args, fmt.Sprintf("--start=%.1f", startSeconds))
+			log.Printf("Starting playback at %.1f seconds", startSeconds)
+		}
+	} else if playerKey == "vlc" {
+		ipcPath = getVlcRCAddress()
+		// Enable RC interface on TCP port
+		args = append(args, "-I", "oldrc", "--rc-host", ipcPath)
+
+		// Add resume position if provided
+		if startSeconds > 0 {
+			args = append(args, fmt.Sprintf("--start-time=%.1f", startSeconds))
 			log.Printf("Starting playback at %.1f seconds", startSeconds)
 		}
 	}
@@ -592,7 +722,8 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	currentPlayerMu.Lock()
 	currentPlayer = cmd
 	playerItemId = itemId
-	mpvIPCPath = ipcPath
+	playerIPCPath = ipcPath
+	currentPlayerType = playerKey
 	lastPosition = 0
 	videoDuration = 0
 	embyServerURL = serverURL
@@ -610,8 +741,17 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		cmd.Wait()
 
 		// Get final position before clearing state
-		if mpvIPCPath != "" {
-			getMpvPlaybackInfo() // Updates lastPosition
+		currentPlayerMu.Lock()
+		pType := currentPlayerType
+		ipc := playerIPCPath
+		currentPlayerMu.Unlock()
+
+		if ipc != "" {
+			if pType == "mpv" {
+				getMpvPlaybackInfo() // Updates lastPosition
+			} else if pType == "vlc" {
+				getVlcPlaybackInfo() // Updates lastPosition
+			}
 		}
 
 		// Report playback stopped to Emby
@@ -621,7 +761,8 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		if currentPlayer == cmd {
 			currentPlayer = nil
 			playerItemId = ""
-			mpvIPCPath = ""
+			playerIPCPath = ""
+			currentPlayerType = ""
 			embyServerURL = ""
 			embyUserId = ""
 			embyToken = ""
@@ -704,7 +845,7 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 
 	args := append([]string{}, playerConfig.Args...)
 
-	// Add IPC socket for mpv
+	// Add IPC/RC interface args based on player type
 	var ipcPath string
 	if playerKey == "mpv" {
 		ipcPath = getMpvIPCPath()
@@ -712,6 +853,15 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 
 		if startSeconds > 0 {
 			args = append(args, fmt.Sprintf("--start=%.1f", startSeconds))
+			log.Printf("Starting playback at %.1f seconds", startSeconds)
+		}
+	} else if playerKey == "vlc" {
+		ipcPath = getVlcRCAddress()
+		// Enable RC interface on TCP port
+		args = append(args, "-I", "oldrc", "--rc-host", ipcPath)
+
+		if startSeconds > 0 {
+			args = append(args, fmt.Sprintf("--start-time=%.1f", startSeconds))
 			log.Printf("Starting playback at %.1f seconds", startSeconds)
 		}
 	}
@@ -738,7 +888,8 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 	playlist = req.Items
 	playlistPosition = 0
 	playerItemId = req.Items[0].ItemId
-	mpvIPCPath = ipcPath
+	playerIPCPath = ipcPath
+	currentPlayerType = playerKey
 	lastPosition = 0
 	videoDuration = 0
 	embyServerURL = req.ServerURL
@@ -752,7 +903,7 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 	go reportPlaybackStart()
 
 	// Monitor playlist position and wait for player to finish
-	go monitorPlaylist(cmd, ipcPath)
+	go monitorPlaylist(cmd, ipcPath, playerKey)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -762,7 +913,7 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // monitorPlaylist tracks playlist position and reports progress for each item
-func monitorPlaylist(cmd *exec.Cmd, ipcPath string) {
+func monitorPlaylist(cmd *exec.Cmd, ipcPath string, playerType string) {
 	lastPos := 0
 
 	// Poll playlist position every second
@@ -780,7 +931,11 @@ func monitorPlaylist(cmd *exec.Cmd, ipcPath string) {
 		case <-done:
 			// Player exited - report final item stopped
 			if ipcPath != "" {
-				getMpvPlaybackInfo()
+				if playerType == "mpv" {
+					getMpvPlaybackInfo()
+				} else if playerType == "vlc" {
+					getVlcPlaybackInfo()
+				}
 			}
 			reportPlaybackStopped()
 
@@ -788,7 +943,8 @@ func monitorPlaylist(cmd *exec.Cmd, ipcPath string) {
 			if currentPlayer == cmd {
 				currentPlayer = nil
 				playerItemId = ""
-				mpvIPCPath = ""
+				playerIPCPath = ""
+				currentPlayerType = ""
 				playlist = nil
 				playlistPosition = 0
 				embyServerURL = ""
@@ -804,18 +960,26 @@ func monitorPlaylist(cmd *exec.Cmd, ipcPath string) {
 				continue
 			}
 
-			// Query current playlist position from mpv
-			pos, err := queryMpvProperty(ipcPath, "playlist-pos")
-			if err != nil {
+			// Query current playlist position based on player type
+			var newPos int
+			if playerType == "mpv" {
+				pos, err := queryMpvProperty(ipcPath, "playlist-pos")
+				if err != nil {
+					continue
+				}
+				posInt, ok := pos.(float64)
+				if !ok {
+					continue
+				}
+				newPos = int(posInt)
+			} else if playerType == "vlc" {
+				// VLC doesn't have a direct playlist-pos query
+				// We'll skip playlist tracking for VLC for now
+				continue
+			} else {
 				continue
 			}
 
-			posInt, ok := pos.(float64)
-			if !ok {
-				continue
-			}
-
-			newPos := int(posInt)
 			if newPos != lastPos && newPos >= 0 {
 				currentPlayerMu.Lock()
 				plist := playlist
@@ -868,12 +1032,20 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 
 	if cmd != nil && cmd.Process != nil {
 		log.Printf("Stopping player (pid %d)", cmd.Process.Pid)
-		// Try to quit mpv gracefully via IPC first (handles launcher case)
+		// Try to quit gracefully via IPC first (handles launcher case)
 		currentPlayerMu.Lock()
-		pipePath := mpvIPCPath
+		ipcPath := playerIPCPath
+		pType := currentPlayerType
 		currentPlayerMu.Unlock()
-		if pipePath != "" {
-			if err := sendMpvCommand(pipePath, "quit"); err != nil {
+
+		if ipcPath != "" {
+			var err error
+			if pType == "mpv" {
+				err = sendMpvCommand(ipcPath, "quit")
+			} else if pType == "vlc" {
+				err = sendVlcCommand(ipcPath, "quit")
+			}
+			if err != nil {
 				debugLog("IPC quit failed, falling back to kill: %v", err)
 				cmd.Process.Kill()
 			}
@@ -901,6 +1073,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	currentPlayerMu.Lock()
 	cmd := currentPlayer
 	itemId := playerItemId
+	pType := currentPlayerType
 	currentPlayerMu.Unlock()
 
 	// Process running is the source of truth for "playing"
@@ -918,15 +1091,20 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try to get detailed status from mpv IPC (may fail, that's ok)
-	mpvStatus, _ := getMpvPlaybackInfo()
+	// Try to get detailed status from player IPC (may fail, that's ok)
+	var status PlayerStatus
+	if pType == "mpv" {
+		status, _ = getMpvPlaybackInfo()
+	} else if pType == "vlc" {
+		status, _ = getVlcPlaybackInfo()
+	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"playing":  true, // Process is running
-		"paused":   mpvStatus.Paused,
+		"paused":   status.Paused,
 		"itemId":   itemId,
-		"position": mpvStatus.Position,
-		"duration": mpvStatus.Duration,
+		"position": status.Position,
+		"duration": status.Duration,
 	})
 }
 
