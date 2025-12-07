@@ -7,7 +7,7 @@ export GOFLAGS=-mod=vendor
 	dh $@
 
 override_dh_auto_build:
-	go build -o jellyfin-external-player .
+	go build -o jellyfin-external-player ./cmd/jellyfin-external-player
 
 override_dh_auto_test:
 	# No tests yet
