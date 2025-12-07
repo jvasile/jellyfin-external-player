@@ -1,5 +1,5 @@
 ; NSIS Installer Script for Jellyfin External Player
-; Build with: makensis installer.nsi
+; Build with: makensis windows/installer.nsi (from project root)
 
 !define APPNAME "Jellyfin External Player"
 !define EXENAME "jellyfin-external-player.exe"
@@ -33,9 +33,9 @@ RequestExecutionLevel user
 Section "Install"
     SetOutPath "$INSTDIR"
 
-    ; Install files
+    ; Install files (paths relative to .nsi file location)
     File "jellyfin-external-player.exe"
-    File "jellyfin-external-player.js"
+    File "../jellyfin-external-player.js"
 
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\uninstall.exe"
