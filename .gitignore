@@ -22,4 +22,3 @@ config.json
 .DS_Store
 Thumbs.db
 .claude
-installer.nsi
