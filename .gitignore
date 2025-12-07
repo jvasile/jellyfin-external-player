@@ -1,8 +1,6 @@
 # Binaries
-embyfin-kiosk
-embyfin-kiosk.exe
-jf-external-player
-jf-external-player.exe
+jellyfin-external-player
+jellyfin-external-player.exe
 *.exe
 *.dll
 *.so
@@ -11,8 +9,8 @@ jf-external-player.exe
 # Config (contains user-specific paths)
 config.json
 
-# Go
-go.sum
+# Go build artifacts
+.gocache/
 
 # IDE
 .idea/
@@ -23,3 +21,4 @@ go.sum
 # OS
 .DS_Store
 Thumbs.db
+.claude
