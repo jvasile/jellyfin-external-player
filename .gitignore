@@ -1,6 +1,6 @@
 # Binaries
-jellyfin-external-player
-jellyfin-external-player.exe
+/jellyfin-external-player
+/jellyfin-external-player.exe
 *.exe
 *.dll
 *.so

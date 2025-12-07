@@ -10,11 +10,11 @@ linux: jellyfin-external-player
 
 windows: jellyfin-external-player.exe
 
-jellyfin-external-player: *.go go.mod
-	go build -o jellyfin-external-player .
+jellyfin-external-player: cmd/jellyfin-external-player/*.go go.mod
+	go build -o jellyfin-external-player ./cmd/jellyfin-external-player
 
-jellyfin-external-player.exe: *.go go.mod
-	GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o jellyfin-external-player.exe .
+jellyfin-external-player.exe: cmd/jellyfin-external-player/*.go go.mod
+	GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o jellyfin-external-player.exe ./cmd/jellyfin-external-player
 
 # Build Windows installer using NSIS
 # Install: sudo apt install nsis
@@ -23,7 +23,7 @@ installer: jellyfin-external-player.exe jellyfin-external-player.js
 	chmod +x jellyfin-external-player-setup.exe
 
 build:
-	go build -mod=vendor -o jellyfin-external-player .
+	go build -mod=vendor -o jellyfin-external-player ./cmd/jellyfin-external-player
 
 install: build
 	install -d $(DESTDIR)$(BINDIR)
