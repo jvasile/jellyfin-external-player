@@ -47,6 +47,13 @@ type Config struct {
 	Debug         bool                    `json:"debug"`           // Enable verbose logging
 }
 
+// Version info - set by linker flags
+var (
+	Version   = "0.1.0"
+	CommitHash = "unknown"
+	BuildTime  = "unknown"
+)
+
 var (
 	config     Config
 	configPath string
@@ -2250,8 +2257,15 @@ func (w *syncWriter) Write(p []byte) (n int, err error) {
 func main() {
 	// Parse command-line flags
 	var portFlag int
+	var versionFlag bool
 	flag.IntVar(&portFlag, "port", 0, "Port to listen on (overrides config)")
+	flag.BoolVar(&versionFlag, "version", false, "Print version and exit")
 	flag.Parse()
+
+	if versionFlag {
+		fmt.Printf("%s (%s %s)\n", Version, CommitHash, BuildTime)
+		os.Exit(0)
+	}
 
 	// Set up automatic file logging (truncate on startup)
 	logPath := getDefaultLogPath()

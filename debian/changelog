@@ -1,5 +1,5 @@
-jellyfin-external-player (0.1.0-1) unstable; urgency=medium
+jellyfin-external-player (0.1.0) unstable; urgency=medium
 
-  * Initial release. (Closes: #XXXXXX)
+  * Initial release.
 
  -- James Vasile <james@jamesvasile.com>  Sat, 06 Dec 2025 18:39:15 -0500

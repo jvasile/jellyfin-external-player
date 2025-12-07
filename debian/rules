@@ -1,13 +1,16 @@
 #!/usr/bin/make -f
 
 export GOCACHE=$(CURDIR)/.gocache
-export GOFLAGS=-mod=vendor
+
+# Enable PIE and RELRO for Go binaries
+export CGO_ENABLED=1
+GOFLAGS := -buildmode=pie -ldflags "-linkmode=external -extldflags '-Wl,-z,relro,-z,now'"
 
 %:
 	dh $@
 
 override_dh_auto_build:
-	go build -o jellyfin-external-player ./cmd/jellyfin-external-player
+	go build $(GOFLAGS) -o jellyfin-external-player ./cmd/jellyfin-external-player
 
 override_dh_auto_test:
 	# No tests yet
