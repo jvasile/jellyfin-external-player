@@ -35,7 +35,7 @@ Section "Install"
 
     ; Install files (paths relative to .nsi file location)
     File "jellyfin-external-player.exe"
-    File "../jellyfin-external-player.js"
+    File "../dist/jellyfin-external-player.js"
 
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\uninstall.exe"

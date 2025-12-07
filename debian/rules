@@ -17,8 +17,9 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	install -D -m 755 jellyfin-external-player debian/jellyfin-external-player/usr/bin/jellyfin-external-player
-	install -D -m 644 jellyfin-external-player.js debian/jellyfin-external-player/usr/share/jellyfin-external-player/jellyfin-external-player.js
-	install -D -m 644 debian/jellyfin-external-player.user.service debian/jellyfin-external-player/usr/lib/systemd/user/jellyfin-external-player.service
+	install -D -m 644 dist/jellyfin-external-player.js debian/jellyfin-external-player/usr/share/jellyfin-external-player/jellyfin-external-player.js
+	install -D -m 755 dist/fix-smb-names.sh debian/jellyfin-external-player/usr/share/jellyfin-external-player/fix-smb-names.sh
+	install -D -m 644 dist/jellyfin-external-player.service debian/jellyfin-external-player/usr/lib/systemd/user/jellyfin-external-player.service
 
 override_dh_auto_clean:
 	rm -f jellyfin-external-player

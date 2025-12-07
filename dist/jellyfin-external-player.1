@@ -80,6 +80,23 @@ To view logs:
 journalctl \-\-user \-u jellyfin-external-player
 .fi
 .RE
+.SH SMB FILENAME UTILITY
+Windows/SMB does not support certain characters in filenames:
+\fB: * ? " < > |\fR. When accessing files with these characters over SMB,
+Samba mangles the names into unreadable forms like "3U0D2T~Q".
+.PP
+The included \fBfix-smb-names.sh\fR script finds and renames files with
+problematic characters. Run it on the Linux machine where the files are
+stored locally:
+.PP
+.RS
+.nf
+/usr/share/jellyfin-external-player/fix-smb-names.sh scan /path/to/media
+/usr/share/jellyfin-external-player/fix-smb-names.sh rename /path/to/media
+.fi
+.RE
+.PP
+The script replaces \fB:\fR with \fB-\fR and removes \fB?\fR from filenames.
 .SH FILES
 .TP
 .I ~/.config/jellyfin-external-player/config.json
@@ -87,6 +104,9 @@ User configuration file.
 .TP
 .I /usr/share/jellyfin-external-player/jellyfin-external-player.js
 JavaScript injected into Jellyfin pages.
+.TP
+.I /usr/share/jellyfin-external-player/fix-smb-names.sh
+Utility script to fix SMB-incompatible filenames.
 .TP
 .I /tmp/jellyfin-external-player.log
 Log file (Linux). On Windows, stored in %TEMP%.

@@ -23,7 +23,7 @@ windows/jellyfin-external-player.exe: cmd/jellyfin-external-player/*.go go.mod
 
 # Build Windows installer using NSIS
 # Install: sudo apt install nsis
-installer: windows/jellyfin-external-player.exe jellyfin-external-player.js
+installer: windows/jellyfin-external-player.exe dist/jellyfin-external-player.js
 	cd windows && makensis installer.nsi
 	chmod +x windows/jellyfin-external-player-setup.exe
 
@@ -31,12 +31,12 @@ install: linux
 	install -d $(DESTDIR)$(BINDIR)
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 755 jellyfin-external-player $(DESTDIR)$(BINDIR)/
-	install -m 644 jellyfin-external-player.js $(DESTDIR)$(BINDIR)/
-	install -m 644 jellyfin-external-player.1 $(DESTDIR)$(MANDIR)/
+	install -m 644 dist/jellyfin-external-player.js $(DESTDIR)$(BINDIR)/
+	install -m 644 dist/jellyfin-external-player.1 $(DESTDIR)$(MANDIR)/
 
 install-service:
 	mkdir -p ~/.config/systemd/user
-	cp jellyfin-external-player.service ~/.config/systemd/user/
+	cp dist/jellyfin-external-player.service ~/.config/systemd/user/
 	systemctl --user daemon-reload
 	systemctl --user enable jellyfin-external-player
 
