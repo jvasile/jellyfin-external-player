@@ -338,7 +338,7 @@ func defaultConfig() Config {
 		Player: "mpv",
 		Players: map[string]PlayerConfig{
 			"mpv": {Name: "mpv", Path: "mpv", Args: []string{"--fs"}},
-			"vlc": {Name: "VLC", Path: "vlc", Args: []string{"--fullscreen"}},
+			"vlc": {Name: "VLC", Path: "vlc", Args: []string{"--fullscreen", "--play-and-exit"}},
 		},
 		PathMappings: []PathMapping{
 			{Type: "prefix", Match: "", Replace: ""},
