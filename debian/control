@@ -1,0 +1,27 @@
+Source: jellyfin-external-player
+Section: video
+Priority: optional
+Maintainer: James Vasile <james@jamesvasile.com>
+Build-Depends: debhelper-compat (= 13), golang-go (>= 2:1.21~)
+Standards-Version: 4.6.2
+Homepage: https://github.com/jvasile/jellyfin-external-player
+Vcs-Git: https://github.com/jvasile/jellyfin-external-player.git
+Vcs-Browser: https://github.com/jvasile/jellyfin-external-player
+Rules-Requires-Root: no
+
+Package: jellyfin-external-player
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: mpv | vlc
+Description: Launch external video player for Jellyfin
+ jellyfin-external-player intercepts Jellyfin video playback requests and
+ launches an external player (mpv or VLC) instead of the web player.
+ .
+ Features include:
+  * Direct playback in mpv or VLC
+  * Resume support with progress sync back to Jellyfin
+  * Path mapping for NFS/SMB shares
+  * Playlist support for seasons/series
+ .
+ A browser userscript manager (Tampermonkey, Violentmonkey, etc.) is
+ required to inject the playback interception script.

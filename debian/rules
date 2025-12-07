@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+
+export GOCACHE=$(CURDIR)/.gocache
+export GOFLAGS=-mod=vendor
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build -o jellyfin-external-player .
+
+override_dh_auto_test:
+	# No tests yet
+
+override_dh_auto_install:
+	install -D -m 755 jellyfin-external-player debian/jellyfin-external-player/usr/bin/jellyfin-external-player
+	install -D -m 644 jellyfin-external-player.js debian/jellyfin-external-player/usr/share/jellyfin-external-player/jellyfin-external-player.js
+	install -D -m 644 debian/jellyfin-external-player.user.service debian/jellyfin-external-player/usr/lib/systemd/user/jellyfin-external-player.service
+
+override_dh_auto_clean:
+	rm -f jellyfin-external-player
+	rm -rf .gocache
+
+override_dh_dwz:
+	# Go binaries don't work with dwz
