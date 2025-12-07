@@ -2,7 +2,7 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man/man1
 
-.PHONY: all linux windows build install install-service vendor deb clean
+.PHONY: all linux windows installer build install install-service vendor deb clean
 
 all: linux windows
 
@@ -14,7 +14,13 @@ jellyfin-external-player: *.go go.mod
 	go build -o jellyfin-external-player .
 
 jellyfin-external-player.exe: *.go go.mod
-	GOOS=windows GOARCH=amd64 go build -o jellyfin-external-player.exe .
+	GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o jellyfin-external-player.exe .
+
+# Build Windows installer using NSIS
+# Install: sudo apt install nsis
+installer: jellyfin-external-player.exe jellyfin-external-player.js
+	makensis installer.nsi
+	chmod +x jellyfin-external-player-setup.exe
 
 build:
 	go build -mod=vendor -o jellyfin-external-player .
@@ -40,4 +46,4 @@ deb:
 	dpkg-buildpackage -us -uc
 
 clean:
-	rm -f jellyfin-external-player jellyfin-external-player.exe
+	rm -f jellyfin-external-player jellyfin-external-player.exe jellyfin-external-player-setup.exe
