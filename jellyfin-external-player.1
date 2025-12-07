@@ -1,0 +1,102 @@
+.TH JELLYFIN-EXTERNAL-PLAYER 1 "December 2024" "jellyfin-external-player" "User Commands"
+.SH NAME
+jellyfin-external-player \- launch external video player for Jellyfin
+.SH SYNOPSIS
+.B jellyfin-external-player
+[\fB\-port\fR \fIPORT\fR]
+.SH DESCRIPTION
+.B jellyfin-external-player
+runs a local HTTP server that intercepts Jellyfin video playback requests
+and launches an external player (mpv or VLC) instead of the web player.
+.PP
+A browser userscript injects JavaScript into Jellyfin pages to redirect
+play requests to the local server. The server translates file paths
+(e.g., from NFS to SMB) and launches the configured player.
+.PP
+Playback progress is reported back to Jellyfin when the player closes,
+so resume positions are preserved.
+.SH OPTIONS
+.TP
+.BR \-port " " \fIPORT\fR
+Listen on the specified port instead of the default (9998).
+Can also be set via the \fBJELLYFIN_EXTERNAL_PORT\fR environment variable
+or in the config file.
+.SH CONFIGURATION
+Configuration is stored in:
+.TP
+Linux:
+\fI~/.config/jellyfin-external-player/config.json\fR
+.TP
+Windows:
+\fI%APPDATA%\\jellyfin-external-player\\config.json\fR
+.PP
+The configuration web interface is available at \fIhttp://localhost:9998/config\fR
+when the server is running.
+.SS Path Mappings
+Path mappings transform file paths from the Jellyfin server to paths
+accessible by the local machine. Three mapping types are supported:
+.TP
+.B prefix
+Simple string prefix replacement.
+.TP
+.B wildcard
+Pattern matching with \fB*\fR (any except /) and \fB**\fR (any including /).
+.TP
+.B regex
+Full regular expression matching.
+.SH USERSCRIPT INSTALLATION
+.IP 1. 3
+Install a userscript manager (Tampermonkey, Violentmonkey, etc.)
+.IP 2. 3
+Start the server: \fBjellyfin-external-player\fR
+.IP 3. 3
+Open \fIhttp://localhost:9998/install\fR
+.IP 4. 3
+Click "Install Userscript"
+.SH SYSTEMD INTEGRATION
+A systemd user service is provided. To enable automatic startup when
+logging in to a graphical session:
+.PP
+.RS
+.nf
+systemctl \-\-user enable \-\-now jellyfin-external-player
+.fi
+.RE
+.PP
+The service only runs during graphical sessions, not for SSH logins.
+.PP
+To check status:
+.PP
+.RS
+.nf
+systemctl \-\-user status jellyfin-external-player
+.fi
+.RE
+.PP
+To view logs:
+.PP
+.RS
+.nf
+journalctl \-\-user \-u jellyfin-external-player
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/jellyfin-external-player/config.json
+User configuration file.
+.TP
+.I /usr/share/jellyfin-external-player/jellyfin-external-player.js
+JavaScript injected into Jellyfin pages.
+.TP
+.I /tmp/jellyfin-external-player.log
+Log file (Linux). On Windows, stored in %TEMP%.
+.SH ENVIRONMENT
+.TP
+.B JELLYFIN_EXTERNAL_PORT
+Override the listening port.
+.SH SEE ALSO
+.BR mpv (1),
+.BR vlc (1),
+.BR systemctl (1)
+.SH BUGS
+Report bugs at: https://github.com/jvasile/jellyfin-external-player/issues
