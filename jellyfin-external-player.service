@@ -1,0 +1,13 @@
+[Unit]
+Description=Jellyfin External Player
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=jellyfin-external-player
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
