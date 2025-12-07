@@ -6,7 +6,7 @@
 
     const KIOSK_SERVER = '{{KIOSK_SERVER}}';
     const DEBUG = {{DEBUG}};
-    const PREF_KEY_PREFIX = 'jf-external-player-';
+    const PREF_KEY_PREFIX = 'jellyfin-external-player-';
 
     function debugLog(...args) {
         if (DEBUG) console.log('JF External Player:', ...args);
@@ -28,10 +28,10 @@
         if (modalElement) return;
 
         modalElement = document.createElement('div');
-        modalElement.id = 'jf-external-player-modal';
+        modalElement.id = 'jellyfin-external-player-modal';
         modalElement.innerHTML = `
             <style>
-                #jf-external-player-modal {
+                #jellyfin-external-player-modal {
                     position: fixed;
                     top: 0;
                     left: 0;
@@ -43,7 +43,7 @@
                     align-items: center;
                     justify-content: center;
                 }
-                #jf-external-player-modal .modal-box {
+                #jellyfin-external-player-modal .modal-box {
                     background: #1a1a1a;
                     border: 1px solid #333;
                     border-radius: 8px;
@@ -53,23 +53,23 @@
                     font-family: system-ui, sans-serif;
                     max-width: 500px;
                 }
-                #jf-external-player-modal .modal-title {
+                #jellyfin-external-player-modal .modal-title {
                     font-size: 24px;
                     margin-bottom: 20px;
                 }
-                #jf-external-player-modal .modal-status {
+                #jellyfin-external-player-modal .modal-status {
                     font-size: 16px;
                     color: #aaa;
                     margin-bottom: 30px;
                 }
-                #jf-external-player-modal .modal-hint {
+                #jellyfin-external-player-modal .modal-hint {
                     font-size: 13px;
                     color: #666;
                 }
-                #jf-external-player-modal .modal-error {
+                #jellyfin-external-player-modal .modal-error {
                     color: #ff6b6b;
                 }
-                #jf-external-player-modal .spinner {
+                #jellyfin-external-player-modal .spinner {
                     width: 40px;
                     height: 40px;
                     border: 3px solid #333;
@@ -213,7 +213,7 @@
             })
             .catch(error => {
                 console.error('JF External Player: Failed to connect', error);
-                updateModalStatus('Could not connect to server. Is jf-external-player running?', true);
+                updateModalStatus('Could not connect to server. Is jellyfin-external-player running?', true);
                 setTimeout(hideModal, 3000);
             });
     }
@@ -524,7 +524,7 @@
                         let isResume = true;
                         console.log('JF External Player: startPositionTicks =', startPositionTicks, 'isResume =', isResume);
 
-                        const event = new CustomEvent('jf-external-player-play', {
+                        const event = new CustomEvent('jellyfin-external-player-play', {
                             detail: { itemId: itemId, startPositionTicks: startPositionTicks, isResume: isResume }
                         });
                         document.dispatchEvent(event);
@@ -578,7 +578,7 @@
         document.documentElement.appendChild(script);
         script.remove();
 
-        document.addEventListener('jf-external-player-play', async function(e) {
+        document.addEventListener('jellyfin-external-player-play', async function(e) {
             const itemId = e.detail.itemId;
             const startPositionTicks = e.detail.startPositionTicks || 0;
             const isResume = e.detail.isResume !== false;
@@ -598,7 +598,7 @@
     // Intercept all video playback by overriding HTMLVideoElement.play
     function interceptVideoPlayback() {
         window.addEventListener('message', async function(e) {
-            if (e.data && e.data.type === 'jf-external-player-intercept') {
+            if (e.data && e.data.type === 'jellyfin-external-player-intercept') {
                 const itemId = e.data.itemId;
                 const src = e.data.src;
                 console.log('JF External Player: Handling intercept, itemId:', itemId, 'src:', src);
@@ -677,7 +677,7 @@
                     console.log('JF External Player: Intercepting playback, itemId:', itemId, 'src:', src, 'hash:', window.location.hash);
 
                     window.postMessage({
-                        type: 'jf-external-player-intercept',
+                        type: 'jellyfin-external-player-intercept',
                         itemId: itemId,
                         src: src
                     }, '*');

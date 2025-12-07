@@ -14,5 +14,5 @@ func connectMpvIPC(pipePath string) (net.Conn, error) {
 
 // getMpvIPCPath returns the IPC socket path for mpv on Unix systems
 func getMpvIPCPath() string {
-	return "/tmp/jf-external-player-mpv.sock"
+	return "/tmp/jellyfin-external-player-mpv.sock"
 }

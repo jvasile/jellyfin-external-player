@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// jf-external-player.js is read from disk to allow editing without restart
+// jellyfin-external-player.js is read from disk to allow editing without restart
 
 type PathMapping struct {
 	Type    string `json:"type"`    // "prefix", "wildcard", or "regex"
@@ -208,7 +208,7 @@ func reportPlaybackStart() {
 		"ItemId":      itemId,
 		"CanSeek":     true,
 		"PlayMethod":  "DirectPlay",
-		"PlaySessionId": fmt.Sprintf("jf-external-player-%d", time.Now().Unix()),
+		"PlaySessionId": fmt.Sprintf("jellyfin-external-player-%d", time.Now().Unix()),
 	}
 	bodyBytes, _ := json.Marshal(body)
 
@@ -256,7 +256,7 @@ func reportPlaybackStopped() {
 	body := map[string]interface{}{
 		"ItemId":        itemId,
 		"PositionTicks": positionTicks,
-		"PlaySessionId": fmt.Sprintf("jf-external-player-%d", time.Now().Unix()),
+		"PlaySessionId": fmt.Sprintf("jellyfin-external-player-%d", time.Now().Unix()),
 	}
 	bodyBytes, _ := json.Marshal(body)
 
@@ -1157,7 +1157,7 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 
         // Check for extension/userscript
         (function checkInstalled() {
-            document.addEventListener('jf-external-player-installed', function() {
+            document.addEventListener('jellyfin-external-player-installed', function() {
                 document.getElementById('installWarning').style.display = 'none';
             });
             setTimeout(() => {
@@ -1397,7 +1397,7 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 
 	script := fmt.Sprintf(`// ==UserScript==
 // @name         JF External Player
-// @namespace    jf-external-player
+// @namespace    jellyfin-external-player
 // @version      1.0
 // @description  Launch external player (mpv) for Jellyfin videos
 // @author       You
@@ -1414,7 +1414,7 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
     // Load main script from server when head is available
     function loadScript() {
         const script = document.createElement('script');
-        script.src = '%s/jf-external-player.js';
+        script.src = '%s/jellyfin-external-player.js';
         (document.head || document.documentElement).appendChild(script);
     }
 
@@ -1438,16 +1438,20 @@ func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 
 	// Try to read from disk (allows editing without restart during development)
-	scriptBytes, err := os.ReadFile("jf-external-player.js")
+	scriptBytes, err := os.ReadFile("jellyfin-external-player.js")
 	if err != nil {
 		// Try relative to executable
 		if exePath, err2 := os.Executable(); err2 == nil {
 			exeDir := filepath.Dir(exePath)
-			scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "jf-external-player.js"))
+			scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "jellyfin-external-player.js"))
 		}
 	}
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read jf-external-player.js: %v", err), http.StatusInternalServerError)
+		// Try FHS location (for distro packages)
+		scriptBytes, err = os.ReadFile("/usr/share/jellyfin-external-player/jellyfin-external-player.js")
+	}
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read jellyfin-external-player.js: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -1566,7 +1570,7 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
 
     <div class="browser-section">
         <h3>Step 3: Install the Userscript</h3>
-        <a href="/jf-external-player.user.js" class="install-btn">Install Userscript</a>
+        <a href="/jellyfin-external-player.user.js" class="install-btn">Install Userscript</a>
         <p style="margin-top: 10px; font-size: 13px; color: #666;">If you change the server URLs, reinstall the userscript to pick up the changes.</p>
         <div id="installStatus" style="margin-top: 15px;"></div>
     </div>
@@ -1662,7 +1666,7 @@ func installPageHandler(w http.ResponseWriter, r *http.Request) {
         // Check if userscript is installed
         (function checkInstalled() {
             const statusDiv = document.getElementById('installStatus');
-            document.addEventListener('jf-external-player-installed', function() {
+            document.addEventListener('jellyfin-external-player-installed', function() {
                 statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 500;">Userscript is installed and active</span>';
             });
             setTimeout(() => {
@@ -2025,7 +2029,24 @@ func getDefaultLogPath() string {
 	} else {
 		tempDir = "/tmp"
 	}
-	return filepath.Join(tempDir, "jf-external-player.log")
+	return filepath.Join(tempDir, "jellyfin-external-player.log")
+}
+
+// Get config directory (XDG_CONFIG_HOME or ~/.config on Linux, AppData on Windows)
+func getConfigDir() string {
+	if runtime.GOOS == "windows" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return filepath.Join(appData, "jellyfin-external-player")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "AppData", "Roaming", "jellyfin-external-player")
+	}
+
+	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
+		return filepath.Join(xdgConfig, "jellyfin-external-player")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "jellyfin-external-player")
 }
 
 
@@ -2058,12 +2079,12 @@ func main() {
 		log.Printf("Logging to %s", logPath)
 	}
 
-	// Determine config path (same directory as executable)
-	exe, err := os.Executable()
-	if err != nil {
-		log.Fatal(err)
+	// Determine config path
+	configDir := getConfigDir()
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		log.Fatalf("Failed to create config directory %s: %v", configDir, err)
 	}
-	configPath = filepath.Join(filepath.Dir(exe), "config.json")
+	configPath = filepath.Join(configDir, "config.json")
 
 	if err := loadConfig(); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -2072,7 +2093,7 @@ func main() {
 	// Port priority: CLI flag > env var > config file > default (9998)
 	if portFlag > 0 {
 		config.Port = portFlag
-	} else if envPort := os.Getenv("JF_EXTERNAL_PORT"); envPort != "" {
+	} else if envPort := os.Getenv("JELLYFIN_EXTERNAL_PORT"); envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			config.Port = p
 		}
@@ -2095,8 +2116,8 @@ func main() {
 	http.HandleFunc("/config", configPageHandler)
 	http.HandleFunc("/help/mappings", helpMappingsHandler)
 	http.HandleFunc("/install", installPageHandler)
-	http.HandleFunc("/jf-external-player.user.js", userscriptHandler)
-	http.HandleFunc("/jf-external-player.js", mainScriptHandler)
+	http.HandleFunc("/jellyfin-external-player.user.js", userscriptHandler)
+	http.HandleFunc("/jellyfin-external-player.js", mainScriptHandler)
 	http.HandleFunc("/api/restart", restartHandler)
 	http.HandleFunc("/api/shutdown", shutdownHandler)
 

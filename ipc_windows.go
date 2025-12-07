@@ -15,5 +15,5 @@ func connectMpvIPC(pipePath string) (net.Conn, error) {
 
 // getMpvIPCPath returns the IPC path for mpv on Windows
 func getMpvIPCPath() string {
-	return `\\.\pipe\jf-external-player-mpv`
+	return `\\.\pipe\jellyfin-external-player-mpv`
 }
