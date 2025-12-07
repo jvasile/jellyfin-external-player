@@ -2,7 +2,7 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man/man1
 
-.PHONY: all linux windows installer build install install-service vendor deb clean
+.PHONY: all linux windows installer install install-service vendor deb clean
 
 all: linux windows
 
@@ -22,10 +22,7 @@ installer: jellyfin-external-player.exe jellyfin-external-player.js
 	makensis installer.nsi
 	chmod +x jellyfin-external-player-setup.exe
 
-build:
-	go build -mod=vendor -o jellyfin-external-player ./cmd/jellyfin-external-player
-
-install: build
+install: linux
 	install -d $(DESTDIR)$(BINDIR)
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 755 jellyfin-external-player $(DESTDIR)$(BINDIR)/
