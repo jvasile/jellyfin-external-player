@@ -7,7 +7,7 @@ COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILDTIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.Version=$(VERSION) -X main.CommitHash=$(COMMIT) -X main.BuildTime=$(BUILDTIME)
 
-.PHONY: all linux windows installer install install-service deb github-release clean
+.PHONY: all linux windows windows-installer install install-service deb github-release clean
 
 all: linux windows
 
@@ -23,7 +23,7 @@ windows/jellyfin-external-player.exe: cmd/jellyfin-external-player/*.go go.mod
 
 # Build Windows installer using NSIS
 # Install: sudo apt install nsis
-installer: windows/jellyfin-external-player.exe dist/jellyfin-external-player.js
+windows-installer: windows/jellyfin-external-player.exe dist/jellyfin-external-player.js
 	cd windows && makensis installer.nsi
 	chmod +x windows/jellyfin-external-player-setup.exe
 
@@ -49,7 +49,7 @@ deb:
 	fi
 	dpkg-buildpackage
 
-github-release: deb installer
+github-release: deb windows-installer
 	gh release create v$(VERSION) \
 		../jellyfin-external-player_$(VERSION)_amd64.deb \
 		windows/jellyfin-external-player-setup.exe \
