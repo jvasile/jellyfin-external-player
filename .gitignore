@@ -12,6 +12,14 @@ config.json
 # Go build artifacts
 .gocache/
 
+# Debian build artifacts
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.debhelper
+debian/*.substvars
+debian/jellyfin-external-player/
+
 # IDE
 .idea/
 .vscode/
