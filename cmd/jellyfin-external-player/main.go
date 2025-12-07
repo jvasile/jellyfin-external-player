@@ -2363,6 +2363,9 @@ func main() {
 	log.Printf("Play endpoint: http://%s/api/play?path=...", addr)
 
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprintf("Failed to start server on %s:\n\n%v\n\nAnother instance may already be running.", addr, err)
+		log.Print(errMsg)
+		showFatalError(errMsg)
+		os.Exit(1)
 	}
 }
