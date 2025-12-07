@@ -2254,17 +2254,52 @@ func (w *syncWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
+// filterOutArg removes a flag from args (used to strip --background when spawning child)
+func filterOutArg(args []string, flag string) []string {
+	var result []string
+	for _, arg := range args {
+		if arg != flag && arg != "-"+flag && arg != "--"+flag {
+			result = append(result, arg)
+		}
+	}
+	return result
+}
+
 func main() {
 	// Parse command-line flags
 	var portFlag int
 	var versionFlag bool
+	var backgroundFlag bool
 	flag.IntVar(&portFlag, "port", 0, "Port to listen on (overrides config)")
 	flag.BoolVar(&versionFlag, "version", false, "Print version and exit")
+	flag.BoolVar(&backgroundFlag, "background", false, "Run with auto-restart (restart on exit 0, stop on exit 1)")
 	flag.Parse()
 
 	if versionFlag {
 		fmt.Printf("%s (%s %s)\n", Version, CommitHash, BuildTime)
 		os.Exit(0)
+	}
+
+	// Background mode: run child process in a loop, restarting on exit code 0
+	if backgroundFlag {
+		for {
+			// Spawn child without --background flag
+			childArgs := filterOutArg(os.Args[1:], "background")
+			cmd := exec.Command(os.Args[0], childArgs...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err := cmd.Run()
+			if err != nil {
+				// Non-zero exit (shutdown requested), stop the loop
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					os.Exit(exitErr.ExitCode())
+				}
+				os.Exit(1)
+			}
+			// Exit code 0 (restart requested), loop continues
+			log.Println("Restarting...")
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 
 	// Set up automatic file logging (truncate on startup)
