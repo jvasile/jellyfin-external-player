@@ -2,7 +2,19 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man/man1
 
-.PHONY: build install install-service vendor deb clean
+.PHONY: all linux windows build install install-service vendor deb clean
+
+all: linux windows
+
+linux: jellyfin-external-player
+
+windows: jellyfin-external-player.exe
+
+jellyfin-external-player: *.go go.mod
+	go build -o jellyfin-external-player .
+
+jellyfin-external-player.exe: *.go go.mod
+	GOOS=windows GOARCH=amd64 go build -o jellyfin-external-player.exe .
 
 build:
 	go build -mod=vendor -o jellyfin-external-player .
@@ -28,4 +40,4 @@ deb:
 	dpkg-buildpackage -us -uc
 
 clean:
-	rm -f jellyfin-external-player
+	rm -f jellyfin-external-player jellyfin-external-player.exe
