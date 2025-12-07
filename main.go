@@ -599,13 +599,19 @@ func translatePath(path string) string {
 
 	for _, mapping := range config.PathMappings {
 		if result, matched := applyMapping(path, mapping); matched {
-			// Convert forward slashes to backslashes for Windows
-			return strings.ReplaceAll(result, "/", `\`)
+			// Only convert slashes for Windows UNC paths, not for URLs like smb://
+			if runtime.GOOS == "windows" && !strings.Contains(result, "://") {
+				return strings.ReplaceAll(result, "/", `\`)
+			}
+			return result
 		}
 	}
 
-	// No match - just convert slashes
-	return strings.ReplaceAll(path, "/", `\`)
+	// No match - convert slashes only on Windows
+	if runtime.GOOS == "windows" {
+		return strings.ReplaceAll(path, "/", `\`)
+	}
+	return path
 }
 
 func playHandler(w http.ResponseWriter, r *http.Request) {
@@ -689,7 +695,7 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	} else if playerKey == "vlc" {
 		ipcPath = getVlcRCAddress()
 		// Enable RC interface on TCP port
-		args = append(args, "-I", "oldrc", "--rc-host", ipcPath)
+		args = append(args, "--extraintf", "oldrc", "--rc-host", ipcPath)
 
 		// Add resume position if provided
 		if startSeconds > 0 {
@@ -858,7 +864,7 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 	} else if playerKey == "vlc" {
 		ipcPath = getVlcRCAddress()
 		// Enable RC interface on TCP port
-		args = append(args, "-I", "oldrc", "--rc-host", ipcPath)
+		args = append(args, "--extraintf", "oldrc", "--rc-host", ipcPath)
 
 		if startSeconds > 0 {
 			args = append(args, fmt.Sprintf("--start-time=%.1f", startSeconds))
@@ -1296,6 +1302,8 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
         <strong>Warning!</strong> No browser extension or userscript detected.
         <a href="/install">Please install.</a>
     </div>
+
+    <p style="margin-top: 30px; font-size: 12px; color: #666;">Config file: <code>` + escapeHTML(configPath) + `</code></p>
 
     <script>
         let mappingIndex = ` + fmt.Sprintf("%d", len(mappings)) + `;
@@ -2263,6 +2271,7 @@ func main() {
 		log.Fatalf("Failed to create config directory %s: %v", configDir, err)
 	}
 	configPath = filepath.Join(configDir, "config.json")
+	log.Printf("Config file: %s", configPath)
 
 	if err := loadConfig(); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
