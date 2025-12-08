@@ -42,12 +42,21 @@ install-service:
 
 DEB_VERSION := $(shell dpkg-parsechangelog -S Version)
 
+# DEB_SIGN: unset = use default key, "no" = unsigned, <keyid> = specific key
+ifdef DEB_SIGN
+ifeq ($(DEB_SIGN),no)
+DEB_SIGN_FLAGS := -us -uc
+else
+DEB_SIGN_FLAGS := -k$(DEB_SIGN)
+endif
+endif
+
 deb:
 	@if [ "$(VERSION)" != "$(DEB_VERSION)" ]; then \
 		echo "Error: Makefile VERSION ($(VERSION)) != debian/changelog version ($(DEB_VERSION))"; \
 		exit 1; \
 	fi
-	dpkg-buildpackage
+	dpkg-buildpackage $(DEB_SIGN_FLAGS)
 
 github-release: deb windows-installer
 	gh release create v$(VERSION) \
