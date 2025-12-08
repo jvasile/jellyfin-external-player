@@ -464,8 +464,8 @@ func defaultConfig() Config {
 		Port:   9998,
 		Player: "mpv",
 		Players: map[string]PlayerConfig{
-			"mpv": {Name: "mpv", Path: "mpv", Args: []string{"--fs"}},
-			"vlc": {Name: "VLC", Path: "vlc", Args: []string{"--fullscreen", "--play-and-exit"}},
+			"mpv": {Name: "mpv", Path: defaultMpvPath, Args: []string{"--fs"}},
+			"vlc": {Name: "VLC", Path: defaultVlcPath, Args: []string{"--fullscreen", "--play-and-exit"}},
 		},
 		PathMappings: []PathMapping{
 			{Type: "prefix", Match: "", Replace: ""},
@@ -713,8 +713,10 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 
 	args = append(args, pathForPlayer)
 
+	playerPath := fixPlayerPath(playerConfig.Path)
+
 	// Log the exact command line
-	cmdLine := playerConfig.Path
+	cmdLine := playerPath
 	for _, arg := range args {
 		if strings.Contains(arg, " ") {
 			cmdLine += fmt.Sprintf(" %q", arg)
@@ -724,7 +726,8 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Command: %s", cmdLine)
 
-	cmd := exec.Command(playerConfig.Path, args...)
+	cmd := exec.Command(playerPath, args...)
+	noConsole(cmd) // Prevent console window flash on Windows
 	if err := cmd.Start(); err != nil {
 		log.Printf("Error starting player: %v", err)
 		http.Error(w, fmt.Sprintf("failed to start player: %v", err), http.StatusInternalServerError)
@@ -888,7 +891,9 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 		args = append(args, pathForPlayer)
 	}
 
-	cmd := exec.Command(playerConfig.Path, args...)
+	playerPath := fixPlayerPath(playerConfig.Path)
+	cmd := exec.Command(playerPath, args...)
+	noConsole(cmd) // Prevent console window flash on Windows
 	if err := cmd.Start(); err != nil {
 		log.Printf("Error starting player: %v", err)
 		http.Error(w, fmt.Sprintf("failed to start player: %v", err), http.StatusInternalServerError)
@@ -2288,6 +2293,7 @@ func main() {
 			cmd := exec.Command(os.Args[0], childArgs...)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
+			hideWindow(cmd) // Prevent console window on Windows
 			err := cmd.Run()
 			if err != nil {
 				// Non-zero exit (shutdown requested), stop the loop
@@ -2309,8 +2315,13 @@ func main() {
 		log.Printf("Warning: could not open log file %s: %v", logPath, err)
 	} else {
 		defer logFile.Close()
-		// Log to both file and stderr, sync file after each write
-		log.SetOutput(io.MultiWriter(os.Stderr, &syncWriter{logFile}))
+		// On Windows GUI apps, only log to file (no console available)
+		// On Unix, log to both stderr and file
+		if logToStderr() {
+			log.SetOutput(io.MultiWriter(os.Stderr, &syncWriter{logFile}))
+		} else {
+			log.SetOutput(&syncWriter{logFile})
+		}
 		log.Printf("Logging to %s", logPath)
 	}
 

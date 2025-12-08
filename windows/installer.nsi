@@ -31,6 +31,9 @@ RequestExecutionLevel user
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+    ; Kill any running instance before overwriting
+    nsExec::ExecToLog 'taskkill /F /IM jellyfin-external-player.exe'
+
     SetOutPath "$INSTDIR"
 
     ; Install files (paths relative to .nsi file location)
