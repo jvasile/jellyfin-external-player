@@ -193,7 +193,11 @@
         const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : '';
         const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : '';
 
+        // Construct stream URL as fallback when no path mapping matches
+        const streamUrl = `${serverUrl}/Videos/${itemId}/stream?static=true&api_key=${encodeURIComponent(token)}`;
+
         let url = KIOSK_SERVER + '/api/play?path=' + encodeURIComponent(path);
+        url += '&streamUrl=' + encodeURIComponent(streamUrl);
         if (itemId) url += '&itemId=' + encodeURIComponent(itemId);
         if (serverUrl) url += '&serverUrl=' + encodeURIComponent(serverUrl);
         if (userId) url += '&userId=' + encodeURIComponent(userId);
@@ -291,7 +295,8 @@
 
         return data.Items.map(item => ({
             path: item.Path,
-            itemId: item.Id
+            itemId: item.Id,
+            streamUrl: `${window.location.origin}/Videos/${item.Id}/stream?static=true&api_key=${encodeURIComponent(token)}`
         }));
     }
 
@@ -308,8 +313,14 @@
         const userId = window.ApiClient && window.ApiClient.getCurrentUserId ? window.ApiClient.getCurrentUserId() : '';
         const token = window.ApiClient && window.ApiClient.accessToken ? window.ApiClient.accessToken() : '';
 
+        // Ensure each item has a streamUrl fallback
+        const itemsWithStream = items.map(item => ({
+            ...item,
+            streamUrl: item.streamUrl || `${serverUrl}/Videos/${item.itemId}/stream?static=true&api_key=${encodeURIComponent(token)}`
+        }));
+
         const payload = {
-            items: items,
+            items: itemsWithStream,
             serverUrl: serverUrl,
             userId: userId,
             token: token,

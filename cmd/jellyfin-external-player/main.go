@@ -62,8 +62,9 @@ var (
 
 // PlaylistItem represents one item in a playlist
 type PlaylistItem struct {
-	Path   string `json:"path"`
-	ItemId string `json:"itemId"`
+	Path      string `json:"path"`
+	ItemId    string `json:"itemId"`
+	StreamUrl string `json:"streamUrl,omitempty"`
 }
 
 // Player state tracking
@@ -397,11 +398,8 @@ func defaultConfig() Config {
 		Players: map[string]PlayerConfig{
 			"mpv": {Name: "mpv", Path: defaultMpvPath, Args: []string{"--fs"}},
 		},
-		PathMappings: []PathMapping{
-			{Type: "prefix", Match: "", Replace: ""},
-			{Type: "prefix", Match: "", Replace: ""},
-		},
-		ServerURLs:    []string{}, // Will be populated by discovery
+		PathMappings:  []PathMapping{}, // Empty by default - will use Jellyfin streaming
+		ServerURLs:    []string{},      // Will be populated by discovery
 		ServerURLsSet: false,
 	}
 }
@@ -530,7 +528,9 @@ func applyMapping(path string, mapping PathMapping) (string, bool) {
 	}
 }
 
-func translatePath(path string) string {
+// translatePath applies path mappings and returns (result, matched)
+// If matched is true, a mapping was applied; if false, no mapping matched
+func translatePath(path string) (string, bool) {
 	configMu.RLock()
 	defer configMu.RUnlock()
 
@@ -538,17 +538,17 @@ func translatePath(path string) string {
 		if result, matched := applyMapping(path, mapping); matched {
 			// Only convert slashes for Windows UNC paths, not for URLs like smb://
 			if runtime.GOOS == "windows" && !strings.Contains(result, "://") {
-				return strings.ReplaceAll(result, "/", `\`)
+				return strings.ReplaceAll(result, "/", `\`), true
 			}
-			return result
+			return result, true
 		}
 	}
 
 	// No match - convert slashes only on Windows
 	if runtime.GOOS == "windows" {
-		return strings.ReplaceAll(path, "/", `\`)
+		return strings.ReplaceAll(path, "/", `\`), false
 	}
-	return path
+	return path, false
 }
 
 func playHandler(w http.ResponseWriter, r *http.Request) {
@@ -568,6 +568,7 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	streamUrl := r.URL.Query().Get("streamUrl")
 	itemId := r.URL.Query().Get("itemId")
 	serverURL := r.URL.Query().Get("serverUrl")
 	userId := r.URL.Query().Get("userId")
@@ -583,8 +584,14 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	translatedPath := translatePath(path)
-	log.Printf("Playing: %s -> %s", path, translatedPath)
+	// Try path mapping first; if no mapping matches, use stream URL
+	translatedPath, mappingMatched := translatePath(path)
+	if !mappingMatched && streamUrl != "" {
+		translatedPath = streamUrl
+		log.Printf("Playing (stream): %s", streamUrl)
+	} else {
+		log.Printf("Playing: %s -> %s", path, translatedPath)
+	}
 
 	// Check for colons in SMB paths (indicates a problem)
 	if strings.HasPrefix(translatedPath, `\\`) {
@@ -751,12 +758,17 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Playing playlist of %d items", len(req.Items))
 
-	// Translate all paths
+	// Translate all paths (use stream URL if no mapping matches)
 	var translatedPaths []string
 	for i, item := range req.Items {
-		translated := translatePath(item.Path)
+		translated, mappingMatched := translatePath(item.Path)
+		if !mappingMatched && item.StreamUrl != "" {
+			translated = item.StreamUrl
+			log.Printf("  [%d] (stream) %s", i, item.StreamUrl)
+		} else {
+			log.Printf("  [%d] %s -> %s", i, item.Path, translated)
+		}
 		translatedPaths = append(translatedPaths, translated)
-		log.Printf("  [%d] %s -> %s", i, item.Path, translated)
 	}
 
 	// Get resume position for first item if requested
@@ -1174,8 +1186,14 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
         </div>
 
         <div class="section">
-            <h2>Path Mappings</h2>
-            <p class="help" style="margin-top: 0;">Transform media paths from your server to Windows-accessible paths.</p>
+            <h2>Path Mappings <span style="font-weight: normal; font-size: 14px; color: #666;">(Optional)</span></h2>
+            <p class="help" style="margin-top: 0;">
+                <strong>By default, no mappings are needed.</strong> Videos will stream directly from Jellyfin to mpv.
+            </p>
+            <p class="help">
+                Only add mappings if you want mpv to play files directly via SMB, NFS, or local paths instead of streaming.
+                This can improve quality and reduce server load, but requires your media to be accessible from this machine.
+            </p>
 
             <div id="mappingsContainer">` + mappingRows.String() + `
             </div>
