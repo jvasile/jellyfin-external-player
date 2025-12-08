@@ -32,3 +32,11 @@ func focusProcessWindow(pid int) bool {
 	// Nothing to do on Unix - window managers handle focus
 	return true
 }
+
+// findMpv looks for mpv on Unix (just checks PATH)
+func findMpv() string {
+	if path, err := exec.LookPath("mpv"); err == nil {
+		return path
+	}
+	return ""
+}
