@@ -1,3 +1,13 @@
+jellyfin-external-player (0.2.0) unstable; urgency=medium
+
+  * Remove VLC support, simplify to mpv-only
+  * Auto-detect mpv location on Windows (Scoop, Chocolatey, Program Files)
+  * Auto-focus mpv window on Windows after playback starts
+  * Fix Windows console window flash and logging issues
+  * Add DEB_SIGN option for flexible package signing
+
+ -- James Vasile <james@jamesvasile.com>  Sat, 07 Dec 2025 23:45:00 -0500
+
 jellyfin-external-player (0.1.0) unstable; urgency=medium
 
   * Initial release.
