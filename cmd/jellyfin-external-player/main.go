@@ -1524,6 +1524,10 @@ func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 		if exePath, err2 := os.Executable(); err2 == nil {
 			exeDir := filepath.Dir(exePath)
 			scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "jellyfin-external-player.js"))
+			if err != nil {
+				// Try dist/ subdirectory relative to executable
+				scriptBytes, err = os.ReadFile(filepath.Join(exeDir, "dist", "jellyfin-external-player.js"))
+			}
 		}
 	}
 	if err != nil {
