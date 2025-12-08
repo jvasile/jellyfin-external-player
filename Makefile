@@ -23,7 +23,9 @@ windows/jellyfin-external-player.exe: cmd/jellyfin-external-player/*.go go.mod
 
 # Build Windows installer using NSIS
 # Install: sudo apt install nsis
-windows-installer: windows/jellyfin-external-player.exe dist/jellyfin-external-player.js
+windows-installer: windows/jellyfin-external-player-setup.exe
+
+windows/jellyfin-external-player-setup.exe: windows/jellyfin-external-player.exe dist/jellyfin-external-player.js windows/installer.nsi
 	cd windows && makensis installer.nsi
 	chmod +x windows/jellyfin-external-player-setup.exe
 

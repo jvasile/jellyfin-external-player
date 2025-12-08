@@ -1264,6 +1264,24 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
                 }
             }, 1000);
         })();
+
+        // Check if player is found before saving
+        document.getElementById('configForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            try {
+                const resp = await fetch('/api/check-player');
+                const data = await resp.json();
+                if (!data.found) {
+                    if (!confirm('mpv was not found on this system. Save anyway?')) {
+                        return;
+                    }
+                }
+            } catch (err) {
+                // If check fails, proceed anyway
+                console.warn('Player check failed:', err);
+            }
+            this.submit();
+        });
     </script>
 </body>
 </html>`
@@ -1279,19 +1297,6 @@ func configPageHandler(w http.ResponseWriter, r *http.Request) {
 		player := r.FormValue("player")
 		if player != "mpv" {
 			player = "mpv"
-		}
-
-		// Check if player is on PATH
-		playerPath := player
-		configMu.RLock()
-		if pc, ok := config.Players[player]; ok && pc.Path != "" {
-			playerPath = pc.Path
-		}
-		configMu.RUnlock()
-
-		if _, err := exec.LookPath(playerPath); err != nil {
-			http.Error(w, fmt.Sprintf("Player '%s' not found on PATH. Please install it or configure a custom path.", playerPath), http.StatusBadRequest)
-			return
 		}
 
 		// Parse path mappings from form
@@ -1356,6 +1361,30 @@ func configAPIHandler(w http.ResponseWriter, r *http.Request) {
 	defer configMu.RUnlock()
 
 	json.NewEncoder(w).Encode(config)
+}
+
+func checkPlayerHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	// Use findMpv which checks configured path, PATH, and common install locations
+	mpvPath := findMpv()
+	if mpvPath == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"found": false, "error": "mpv not found"})
+		return
+	}
+
+	// Actually run mpv --version to verify it works
+	cmd := exec.Command(mpvPath, "--version")
+	output, err := cmd.Output()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"found": false, "error": err.Error(), "path": mpvPath})
+		return
+	}
+
+	// Extract first line of version output
+	version := strings.Split(string(output), "\n")[0]
+	json.NewEncoder(w).Encode(map[string]interface{}{"found": true, "path": mpvPath, "version": version})
 }
 
 func helpMappingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -2262,6 +2291,7 @@ func main() {
 	http.HandleFunc("/api/stop", stopHandler)
 	http.HandleFunc("/api/status", statusHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
+	http.HandleFunc("/api/check-player", checkPlayerHandler)
 	http.HandleFunc("/api/discover", discoverHandler)
 	http.HandleFunc("/api/discover/reset", resetDiscoveryHandler)
 	http.HandleFunc("/config", configPageHandler)
