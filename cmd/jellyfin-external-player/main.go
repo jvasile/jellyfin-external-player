@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/md5"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1558,11 +1559,15 @@ func userscriptHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Serve the main JavaScript file with URL templating
+// currentScriptVersion stores hash of the current JS file content
+var currentScriptVersion string
+var scriptVersionMu sync.RWMutex
+
 func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/javascript")
-	// Cache for 1 hour - shift-reload will bypass cache
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	// Cache for 5 minutes - shift-reload will bypass cache
+	w.Header().Set("Cache-Control", "public, max-age=300")
 
 	// Try to read from disk (allows editing without restart during development)
 	scriptBytes, err := os.ReadFile("jellyfin-external-player.js")
@@ -1586,6 +1591,12 @@ func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compute version hash from file content
+	version := fmt.Sprintf("%x", md5.Sum(scriptBytes))[:8]
+	scriptVersionMu.Lock()
+	currentScriptVersion = version
+	scriptVersionMu.Unlock()
+
 	// Inject config values
 	configMu.RLock()
 	port := config.Port
@@ -1595,8 +1606,21 @@ func mainScriptHandler(w http.ResponseWriter, r *http.Request) {
 	kioskServerURL := fmt.Sprintf("http://localhost:%d", port)
 	script := strings.Replace(string(scriptBytes), "{{KIOSK_SERVER}}", kioskServerURL, -1)
 	script = strings.Replace(script, "{{DEBUG}}", fmt.Sprintf("%t", debug), -1)
+	script = strings.Replace(script, "{{SCRIPT_VERSION}}", version, -1)
 
 	w.Write([]byte(script))
+}
+
+func scriptVersionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+
+	scriptVersionMu.RLock()
+	version := currentScriptVersion
+	scriptVersionMu.RUnlock()
+
+	json.NewEncoder(w).Encode(map[string]string{"version": version})
 }
 
 func installPageHandler(w http.ResponseWriter, r *http.Request) {
@@ -2292,6 +2316,7 @@ func main() {
 	http.HandleFunc("/api/status", statusHandler)
 	http.HandleFunc("/api/config", configAPIHandler)
 	http.HandleFunc("/api/check-player", checkPlayerHandler)
+	http.HandleFunc("/api/script-version", scriptVersionHandler)
 	http.HandleFunc("/api/discover", discoverHandler)
 	http.HandleFunc("/api/discover/reset", resetDiscoveryHandler)
 	http.HandleFunc("/config", configPageHandler)

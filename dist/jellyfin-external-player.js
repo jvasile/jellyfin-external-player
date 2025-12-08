@@ -6,13 +6,29 @@
 
     const KIOSK_SERVER = '{{KIOSK_SERVER}}';
     const DEBUG = {{DEBUG}};
+    const SCRIPT_VERSION = '{{SCRIPT_VERSION}}';
     const PREF_KEY_PREFIX = 'jellyfin-external-player-';
 
     function debugLog(...args) {
         if (DEBUG) console.log('JF External Player:', ...args);
     }
 
-    console.log('JF External Player: Script loaded. Server URL:', KIOSK_SERVER);
+    // Check if script is outdated and notify user
+    async function checkScriptVersion() {
+        try {
+            const resp = await fetch(KIOSK_SERVER + '/api/script-version');
+            const data = await resp.json();
+            if (data.version && data.version !== SCRIPT_VERSION) {
+                alert('External player script is outdated. Please refresh the page to get the latest version.');
+                return false;
+            }
+        } catch (e) {
+            debugLog('Version check failed:', e);
+        }
+        return true;
+    }
+
+    console.log('JF External Player: Script loaded. Server URL:', KIOSK_SERVER, 'Version:', SCRIPT_VERSION);
 
     // Modal state
     let modalElement = null;
@@ -215,9 +231,11 @@
                     setTimeout(hideModal, 3000);
                 }
             })
-            .catch(error => {
+            .catch(async error => {
                 console.error('JF External Player: Failed to connect', error);
                 updateModalStatus('Could not connect to server. Is jellyfin-external-player running?', true);
+                // Check if script is outdated
+                await checkScriptVersion();
                 setTimeout(hideModal, 3000);
             });
     }
@@ -344,6 +362,8 @@
         } catch (err) {
             console.error('JF External Player: Playlist error:', err);
             updateModalStatus('Failed to start playlist: ' + err.message, true);
+            // Check if script is outdated
+            await checkScriptVersion();
             setTimeout(() => hideModal(false), 3000);
         }
     }
