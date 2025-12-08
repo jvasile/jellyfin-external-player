@@ -14,11 +14,8 @@ func noConsole(cmd *exec.Cmd) {
 	// Nothing to do on Unix
 }
 
-// Default player paths for Unix
-const (
-	defaultMpvPath = "mpv"
-	defaultVlcPath = "vlc"
-)
+// Default player path for Unix
+const defaultMpvPath = "mpv"
 
 // fixPlayerPath is a no-op on Unix
 func fixPlayerPath(path string) string {

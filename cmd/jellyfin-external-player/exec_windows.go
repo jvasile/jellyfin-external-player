@@ -15,27 +15,21 @@ func hideWindow(cmd *exec.Cmd) {
 	}
 }
 
-// noConsole prevents console window but allows GUI windows to show (for mpv/VLC)
+// noConsole prevents console window but allows GUI windows to show (for mpv)
 func noConsole(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
 	}
 }
 
-// Default player paths for Windows (use .exe to avoid console launcher)
-const (
-	defaultMpvPath = "mpv.exe"
-	defaultVlcPath = "vlc.exe"
-)
+// Default player path for Windows (use .exe to avoid console launcher)
+const defaultMpvPath = "mpv.exe"
 
 // fixPlayerPath ensures we use .exe on Windows to avoid console launchers
 func fixPlayerPath(path string) string {
 	// If it's just "mpv" or "vlc", add .exe to avoid console launcher
 	if path == "mpv" {
 		return "mpv.exe"
-	}
-	if path == "vlc" {
-		return "vlc.exe"
 	}
 	return path
 }
