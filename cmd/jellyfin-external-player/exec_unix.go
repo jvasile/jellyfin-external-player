@@ -26,3 +26,9 @@ func fixPlayerPath(path string) string {
 func logToStderr() bool {
 	return true
 }
+
+// focusProcessWindow is a no-op on Unix
+func focusProcessWindow(pid int) bool {
+	// Nothing to do on Unix - window managers handle focus
+	return true
+}

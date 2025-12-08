@@ -157,6 +157,56 @@ func sendMpvCommand(pipePath, command string) error {
 	return err
 }
 
+// setMpvProperty sets a property on mpv via IPC
+func setMpvProperty(pipePath, property string, value interface{}) error {
+	conn, err := connectMpvIPC(pipePath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+
+	cmd := map[string]interface{}{
+		"command": []interface{}{"set_property", property, value},
+	}
+	cmdBytes, _ := json.Marshal(cmd)
+	cmdBytes = append(cmdBytes, '\n')
+
+	_, err = conn.Write(cmdBytes)
+	return err
+}
+
+// bringMpvToFront sets ontop property to bring mpv window to foreground and requests focus
+func bringMpvToFront(pipePath string, pid int) {
+	go func() {
+		// Wait for mpv to initialize and create its window
+		time.Sleep(800 * time.Millisecond)
+
+		// Set ontop to true to bring window to front
+		if err := setMpvProperty(pipePath, "ontop", true); err != nil {
+			log.Printf("Failed to set ontop: %v", err)
+			return
+		}
+		log.Printf("Set mpv ontop=true")
+
+		// Try multiple times to find and focus the window
+		for i := 0; i < 5; i++ {
+			time.Sleep(200 * time.Millisecond)
+			if focusProcessWindow(pid) {
+				break
+			}
+		}
+
+		// Brief delay then disable ontop so user can alt-tab away later
+		time.Sleep(300 * time.Millisecond)
+		if err := setMpvProperty(pipePath, "ontop", false); err != nil {
+			log.Printf("Failed to unset ontop: %v", err)
+		}
+		log.Printf("Set mpv ontop=false")
+	}()
+}
+
 // Query Emby for stored playback position
 func getStoredPosition(serverURL, userId, token, itemId string) float64 {
 	apiURL := fmt.Sprintf("%s/Users/%s/Items/%s", serverURL, userId, itemId)
@@ -574,6 +624,7 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 		ipcPath = getMpvIPCPath()
 		args = append(args, "--input-ipc-server="+ipcPath)
 
+
 		// Add resume position if provided
 		if startSeconds > 0 {
 			args = append(args, fmt.Sprintf("--start=%.1f", startSeconds))
@@ -618,6 +669,9 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 	currentPlayerMu.Unlock()
 
 	log.Printf("Stored Emby info: server=%s, userId=%s, hasToken=%v", serverURL, userId, token != "")
+
+	// Bring mpv to front via IPC + Windows API
+	bringMpvToFront(ipcPath, cmd.Process.Pid)
 
 	// Report playback started to Emby
 	go reportPlaybackStart()
@@ -733,6 +787,7 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 		ipcPath = getMpvIPCPath()
 		args = append(args, "--input-ipc-server="+ipcPath)
 
+
 		if startSeconds > 0 {
 			args = append(args, fmt.Sprintf("--start=%.1f", startSeconds))
 			log.Printf("Starting playback at %.1f seconds", startSeconds)
@@ -773,6 +828,9 @@ func playlistHandler(w http.ResponseWriter, r *http.Request) {
 	currentPlayerMu.Unlock()
 
 	log.Printf("Stored Emby info: server=%s, userId=%s, hasToken=%v", req.ServerURL, req.UserID, req.Token != "")
+
+	// Bring mpv to front via IPC + Windows API
+	bringMpvToFront(ipcPath, cmd.Process.Pid)
 
 	// Report playback started
 	go reportPlaybackStart()
